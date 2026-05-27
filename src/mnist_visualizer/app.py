@@ -30,6 +30,7 @@ _GRAPH_RATIO   = 0.29     # fraction of viewport width
 _STATS_RATIO   = 0.37
 # draw panel gets the remainder
 CONTENT_H      = WIN_H - 90   # updated dynamically
+PLOT_H         = 165           # initial plot height (recalculated on resize)
 
 NODE_R         = 7
 DRAW_PX        = 9          # screen pixels per MNIST pixel
