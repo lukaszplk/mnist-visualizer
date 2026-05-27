@@ -46,7 +46,8 @@ _DS_COLS       = 5
 _DS_ROWS       = 5
 _DS_N          = _DS_COLS * _DS_ROWS   # 25 images per page
 _IMG_SZ        = 56                    # display size per image (pixels)
-_METRICS       = ["Activation value", "Running average", "Rolling std"]
+_METRICS       = ["Activation value", "Running avg (act)",
+                  "Rolling std (act)", "Weight mean", "Weight std"]
 DRAW_GRID      = 28
 DRAW_CANVAS_SZ = DRAW_PX * DRAW_GRID   # 252
 
@@ -142,6 +143,12 @@ class App:
             [[] for _ in range(_NODE_SHOWN[li])] for li in range(3)
         ]
         self._node_std_history: list[list[list[float]]] = [
+            [[] for _ in range(_NODE_SHOWN[li])] for li in range(3)
+        ]
+        self._node_weight_mean_history: list[list[list[float]]] = [
+            [[] for _ in range(_NODE_SHOWN[li])] for li in range(3)
+        ]
+        self._node_weight_std_history: list[list[list[float]]] = [
             [[] for _ in range(_NODE_SHOWN[li])] for li in range(3)
         ]
         self._node_metric: str = _METRICS[0]
@@ -630,6 +637,8 @@ class App:
             _METRICS[0]: self._node_act_history,
             _METRICS[1]: self._node_avg_history,
             _METRICS[2]: self._node_std_history,
+            _METRICS[3]: self._node_weight_mean_history,
+            _METRICS[4]: self._node_weight_std_history,
         }
         src = hist_map.get(self._node_metric, self._node_act_history)
         for li in range(3):
@@ -825,11 +834,30 @@ class App:
                 if len(self._node_std_history[li][ni]) > _HIST_LEN:
                     self._node_std_history[li][ni].pop(0)
 
+        # weight histories (one value per node = mean/std of incoming weights)
+        for li, W in enumerate(stats.weights):
+            n      = _NODE_SHOWN[li]
+            stride = _NODE_STEPS[li]
+            for ni in range(n):
+                row = W[min(ni * stride, W.shape[0] - 1), :]
+                wm = float(_np.mean(row))
+                ws = float(_np.std(row))
+                wm_hist = self._node_weight_mean_history[li][ni]
+                ws_hist = self._node_weight_std_history[li][ni]
+                wm_hist.append(wm)
+                ws_hist.append(ws)
+                if len(wm_hist) > _HIST_LEN:
+                    wm_hist.pop(0)
+                if len(ws_hist) > _HIST_LEN:
+                    ws_hist.pop(0)
+
         # push the currently selected metric to the chart
         hist_map = {
             _METRICS[0]: self._node_act_history,
             _METRICS[1]: self._node_avg_history,
             _METRICS[2]: self._node_std_history,
+            _METRICS[3]: self._node_weight_mean_history,
+            _METRICS[4]: self._node_weight_std_history,
         }
         src = hist_map.get(self._node_metric, self._node_act_history)
         for li in range(len(stats.activations)):
