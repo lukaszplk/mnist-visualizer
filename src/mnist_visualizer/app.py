@@ -574,7 +574,7 @@ class App:
                                 dpg.set_axis_ticks("cm_y",
                                     tuple((str(i), float(i)) for i in range(10)))
                                 dpg.add_heat_series(
-                                    [[0.0] * 100],
+                                    [0.0] * 100,
                                     rows=10, cols=10,
                                     scale_min=0, scale_max=1,
                                     bounds_min=(-0.5, -0.5),
