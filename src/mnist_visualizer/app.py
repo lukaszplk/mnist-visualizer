@@ -45,7 +45,7 @@ _ROLLING_N     = 20               # window for rolling avg / std
 _DS_COLS       = 5
 _DS_ROWS       = 5
 _DS_N          = _DS_COLS * _DS_ROWS   # 25 images per page
-_IMG_SZ        = 56                    # display size per image (pixels)
+_IMG_SZ        = 64                    # display size per image (pixels)
 _METRICS        = ["Activation value", "Running average", "Rolling std"]
 _WEIGHT_METRICS = ["Weight mean", "Weight std"]
 DRAW_GRID      = 28
@@ -155,9 +155,10 @@ class App:
         self._weight_metric: str = _WEIGHT_METRICS[0]
 
         # dataset browser
-        self._dataset       = None   # loaded lazily
-        self._ds_offset     = 0
-        self._ds_preds: list[int] = []   # predictions for current page
+        self._dataset          = None   # loaded lazily
+        self._ds_offset        = 0
+        self._ds_preds: list[int] = []
+        self._ds_needs_refresh = False  # set by bg thread, consumed by main thread
 
         # highlighted nodes/edges from last inference
         self._highlight_nodes:  list[set] = [set() for _ in range(4)]
@@ -588,6 +589,7 @@ class App:
     # ── Dataset callbacks ─────────────────────────────────────────────────────
 
     def _ensure_dataset(self) -> bool:
+        """Load the MNIST test set.  Safe to call from any thread."""
         if self._dataset is not None:
             return True
         try:
@@ -598,57 +600,71 @@ class App:
                 Path.home() / ".cache" / "mnist_visualizer",
                 train=False, download=True, transform=t,
             )
-            self._update_dataset_display()
+            # signal main thread to refresh textures (dpg calls must be on main thread)
+            self._ds_needs_refresh = True
             return True
         except Exception:
             return False
 
     def _update_dataset_display(self) -> None:
+        """Must be called from the main (render) thread."""
         if self._dataset is None:
             return
+        import numpy as _np
         n = len(self._dataset)
         dpg.set_value("txt_ds_page",
             f"Images {self._ds_offset}–{min(self._ds_offset + _DS_N, n) - 1}  of {n}")
 
+        scale = _IMG_SZ // 28   # 64//28 = 2 (pad remaining with bilinear-ish)
+
         for i in range(_DS_N):
             ds_idx = self._ds_offset + i
             if ds_idx >= n:
-                # blank out
-                blank = [0.1, 0.1, 0.15, 1.0] * (_IMG_SZ * _IMG_SZ)
+                blank = [0.08, 0.08, 0.12, 1.0] * (_IMG_SZ * _IMG_SZ)
                 dpg.set_value(f"tex_ds_{i}", blank)
                 dpg.set_value(f"lbl_ds_{i}", "—")
                 continue
 
             img_tensor, label = self._dataset[ds_idx]
-            # img_tensor: (1, 28, 28) float [0,1]
-            img = img_tensor.squeeze().numpy()
-            # upscale 28→56 with nearest neighbour
-            scale = _IMG_SZ // 28
-            img_up = img.repeat(scale, axis=0).repeat(scale, axis=1)
-            # build RGBA flat float list
-            rgba = []
-            for pv in img_up.ravel():
-                rgba += [float(pv), float(pv), float(min(pv * 1.15, 1.0)), 1.0]
-            dpg.set_value(f"tex_ds_{i}", rgba)
+            img = img_tensor.squeeze().numpy()   # (28, 28) float32 [0,1]
 
-            # label text
-            pred_part = ""
+            # upscale to _IMG_SZ with nearest-neighbour then boost contrast
+            img_up = _np.kron(img, _np.ones((scale, scale), dtype=_np.float32))
+            # crop or pad to exact _IMG_SZ
+            img_up = img_up[:_IMG_SZ, :_IMG_SZ]
+            if img_up.shape[0] < _IMG_SZ or img_up.shape[1] < _IMG_SZ:
+                pad = _np.zeros((_IMG_SZ, _IMG_SZ), dtype=_np.float32)
+                pad[:img_up.shape[0], :img_up.shape[1]] = img_up
+                img_up = pad
+
+            # gamma boost for visibility  (γ = 0.6 brightens mid-tones)
+            img_up = _np.clip(img_up ** 0.6, 0, 1)
+
+            # colour: white digit on dark blue background
+            r = img_up
+            g = img_up
+            b = _np.clip(img_up * 1.2, 0, 1)
+            a = _np.ones_like(img_up)
+            rgba_arr = _np.stack([r, g, b, a], axis=-1).ravel().astype(_np.float32)
+            dpg.set_value(f"tex_ds_{i}", rgba_arr.tolist())
+
+            # label / prediction text
             if i < len(self._ds_preds):
                 p = self._ds_preds[i]
                 tick = "✓" if p == label else "✗"
-                color_tag = (100, 220, 100) if p == label else (220, 80, 80)
-                dpg.configure_item(f"lbl_ds_{i}", color=color_tag)
-                pred_part = f"→{p}{tick}"
+                dpg.configure_item(f"lbl_ds_{i}",
+                    color=(80, 220, 80) if p == label else (220, 80, 80))
+                dpg.set_value(f"lbl_ds_{i}", f"{label}→{p}{tick}")
             else:
                 dpg.configure_item(f"lbl_ds_{i}", color=(200, 200, 160))
-            dpg.set_value(f"lbl_ds_{i}", f"{label} {pred_part}")
+                dpg.set_value(f"lbl_ds_{i}", str(label))
 
     def _on_ds_prev(self) -> None:
         self._ds_preds = []
         if not self._ensure_dataset():
             return
         self._ds_offset = max(0, self._ds_offset - _DS_N)
-        self._update_dataset_display()
+        self._ds_needs_refresh = True
 
     def _on_ds_next(self) -> None:
         self._ds_preds = []
@@ -656,7 +672,7 @@ class App:
             return
         n = len(self._dataset)
         self._ds_offset = min(self._ds_offset + _DS_N, n - _DS_N)
-        self._update_dataset_display()
+        self._ds_needs_refresh = True
 
     def _on_ds_predict(self) -> None:
         if not self._ensure_dataset():
@@ -664,7 +680,6 @@ class App:
         if self._trainer is None or self._trainer.model is None:
             dpg.set_value("txt_ds_page", "Train the network first!")
             return
-        import numpy as np
         self._ds_preds = []
         n = len(self._dataset)
         for i in range(_DS_N):
@@ -675,7 +690,7 @@ class App:
             img = img_tensor.squeeze().numpy()
             pred, *_ = self._trainer.model.predict(img)
             self._ds_preds.append(pred)
-        self._update_dataset_display()
+        self._ds_needs_refresh = True
 
     # ── Node metric callback ──────────────────────────────────────────────────
 
@@ -1061,6 +1076,11 @@ class App:
         threading.Thread(target=self._ensure_dataset, daemon=True).start()
 
         while dpg.is_dearpygui_running():
+            # dataset texture refresh (must happen on main thread)
+            if self._ds_needs_refresh:
+                self._ds_needs_refresh = False
+                self._update_dataset_display()
+
             # handle viewport resize
             vp_w = dpg.get_viewport_width()
             vp_h = dpg.get_viewport_height()
