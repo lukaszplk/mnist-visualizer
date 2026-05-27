@@ -171,6 +171,11 @@ class App:
         self._metrics_computing             = False
         self._last_val_epoch                = -1
 
+        # graph redraw throttle
+        self._last_graph_step   = -1
+        self._graph_redraw_rate = 5    # redraw every N training steps
+        self._inference_drawn   = False
+
         # highlighted nodes/edges from last inference
         self._highlight_nodes:  list[set] = [set() for _ in range(4)]
         self._highlight_edges:  list[set] = [set() for _ in range(3)]
@@ -1006,8 +1011,9 @@ class App:
             return
 
         pred, probs, acts, weights = self._trainer.model.predict(self._draw_grid)
-        self._infer_result = (pred, probs, acts, weights)
+        self._infer_result     = (pred, probs, acts, weights)
         self._inference_active = True
+        self._inference_drawn  = False
 
         # compute decision-path highlights
         self._compute_highlights(pred, acts, weights)
@@ -1097,6 +1103,7 @@ class App:
         # clear stale inference when user draws again
         if self._inference_active:
             self._inference_active = False
+            self._inference_drawn  = False
             self._highlight_nodes  = [set() for _ in range(4)]
             self._highlight_edges  = [set() for _ in range(3)]
 
@@ -1226,7 +1233,10 @@ class App:
             dpg.set_value(f"c{i}_gm",
                 f"{ls.grad_mean:.5f}" if ls.grad_mean else "—")
 
-        self._draw_network(stats.activations, stats.weights)
+        step_now = len(self._loss_history)
+        if step_now - self._last_graph_step >= self._graph_redraw_rate:
+            self._last_graph_step = step_now
+            self._draw_network(stats.activations, stats.weights)
 
         # auto-recompute metrics at each epoch end
         if (stats.epoch != self._last_val_epoch
@@ -1362,11 +1372,11 @@ class App:
 
             if stats is not None:
                 self._update_stats(stats)
-            elif self._inference_active and not stats:
-                # re-draw network with inference highlights (no training stats)
+            elif self._inference_active and not self._inference_drawn:
                 if self._infer_result:
                     _, _, acts, weights = self._infer_result
                     self._draw_network(acts, weights)
+                    self._inference_drawn = True
 
             dpg.render_dearpygui_frame()
 
