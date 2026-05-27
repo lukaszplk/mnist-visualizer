@@ -83,6 +83,9 @@ class MLP(nn.Module):
     def predict(self, image_28x28: "np.ndarray") -> tuple[int, "np.ndarray", list, list]:
         """Run inference on a single 28x28 float32 image (values 0-1).
 
+        Calls layers directly — never invokes forward() so self._activations
+        is never touched.  Fully thread-safe with the training loop.
+
         Returns
         -------
         predicted_class : int
@@ -90,18 +93,27 @@ class MLP(nn.Module):
         activations     : list of np.ndarray, one per layer
         weights         : list of np.ndarray, one per layer
         """
-        import numpy as np
-        self.eval()
         with torch.no_grad():
-            t = torch.tensor(image_28x28, dtype=torch.float32).unsqueeze(0)
-            # normalise same as training
-            t = (t - 0.1307) / 0.3081
-            logits = self(t)
-            probs = torch.softmax(logits, dim=1).squeeze().numpy()
+            t  = torch.tensor(image_28x28, dtype=torch.float32).unsqueeze(0)
+            t  = (t - 0.1307) / 0.3081
+            x  = t.view(-1, 784)
+            a1 = self.relu(self.fc1(x))
+            a2 = self.relu(self.fc2(a1))
+            a3 = self.fc3(a2)
+            probs = torch.softmax(a3, dim=1).squeeze()
             pred  = int(probs.argmax())
-        self.train()
-        _, act_arrays, weight_arrays = self.collect_stats()
-        return pred, probs, act_arrays, weight_arrays
+
+        act_arrays = [
+            a1.squeeze().cpu().numpy(),
+            a2.squeeze().cpu().numpy(),
+            a3.squeeze().cpu().numpy(),
+        ]
+        weight_arrays = [
+            self.fc1.weight.data.cpu().numpy(),
+            self.fc2.weight.data.cpu().numpy(),
+            self.fc3.weight.data.cpu().numpy(),
+        ]
+        return pred, probs.cpu().numpy(), act_arrays, weight_arrays
 
     def collect_stats(self) -> tuple[list[LayerStats], list, list]:
         """Build LayerStats + raw activation/weight arrays from last forward pass."""
