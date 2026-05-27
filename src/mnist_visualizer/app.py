@@ -574,7 +574,7 @@ class App:
                                 dpg.set_axis_ticks("cm_y",
                                     tuple((str(i), float(i)) for i in range(10)))
                                 dpg.add_heat_series(
-                                    [0.0] * 100,
+                                    [[0.0] * 100],
                                     rows=10, cols=10,
                                     scale_min=0, scale_max=1,
                                     bounds_min=(-0.5, -0.5),
@@ -907,8 +907,8 @@ class App:
         cm_norm = cm / _np.maximum(cm.sum(axis=1, keepdims=True), 1)
         cm_norm = _np.nan_to_num(cm_norm, nan=0.0)
         # flip rows (DPG heat_series origin = bottom-left)
-        cm_display = [float(v) for v in _np.ascontiguousarray(cm_norm[::-1]).ravel()]
-        dpg.set_value("series_cm", cm_display)
+        cm_flat = [float(v) for v in _np.ascontiguousarray(cm_norm[::-1]).ravel()]
+        dpg.set_value("series_cm", [cm_flat])
         dpg.configure_item("series_cm", scale_max=1.0)
 
         # per-class table
