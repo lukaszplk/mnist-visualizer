@@ -1,20 +1,13 @@
 """
 mnist_visualizer.app
 ~~~~~~~~~~~~~~~~~~~~
-Dear PyGui application: live network graph on the left, stats dashboard
-on the right.
+Dear PyGui application with three panels:
 
-Layout
-------
-┌───────────────────────────────────────────────────────────────────┐
-│  MNIST Visualizer                                          [Pause] │
-├──────────────────────────────┬────────────────────────────────────┤
-│  Network Graph               │  Stats Dashboard                   │
-│  (nodes = activations,       │  ┌ Loss curve                      │
-│   edges = weight magnitude)  │  ├ Accuracy curve (batch / epoch)  │
-│                              │  ├ Per-layer table                  │
-│                              │  └ Epoch / batch counter           │
-└──────────────────────────────┴────────────────────────────────────┘
+  Left   — live network graph (node colour = activation, edge = weight)
+  Centre — stats dashboard (loss / accuracy plots, per-layer table)
+  Right  — draw-a-digit pad with inference and decision-path highlighting
+
+Controls in the top bar: Start · Pause · Stop · Epochs · Batch · LR
 """
 
 from __future__ import annotations
@@ -30,41 +23,46 @@ import numpy as np
 from .model import TrainStats
 from .trainer import Trainer
 
-# ── Layout constants ──────────────────────────────────────────────────────────
-WIN_W, WIN_H = 1300, 760
-GRAPH_W = 520
-STATS_W = WIN_W - GRAPH_W - 20
-PLOT_H  = 180
-NODE_R  = 7          # node radius in pixels
-MAX_EDGES_PER_LAYER = 80   # cap drawn edges for performance
+# ── Layout ────────────────────────────────────────────────────────────────────
+WIN_W, WIN_H   = 1580, 800
+GRAPH_W        = 460
+STATS_W        = 580
+DRAW_W         = WIN_W - GRAPH_W - STATS_W - 30
+PLOT_H         = 165
+CONTENT_H      = WIN_H - 90
 
-# layer display sizes (cap large layers for drawing)
-_DRAW_SIZES = [16, 16, 16, 10]   # nodes actually drawn per layer (visual)
-_LAYER_NAMES = ["Input\n(784)", "Hidden 1\n(128)", "Hidden 2\n(64)", "Output\n(10)"]
+NODE_R         = 7
+DRAW_PX        = 9          # screen pixels per MNIST pixel
+DRAW_GRID      = 28
+DRAW_CANVAS_SZ = DRAW_PX * DRAW_GRID   # 252
 
+_DRAW_SIZES  = [16, 16, 16, 10]
+_LAYER_NAMES = ["Input (784)", "Hidden 1 (128)", "Hidden 2 (64)", "Output (10)"]
+_DIGIT_LABELS = [str(i) for i in range(10)]
+
+
+# ── Colour helpers ────────────────────────────────────────────────────────────
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
-def _activation_color(value: float) -> tuple[int, int, int, int]:
-    """Map normalised activation [0,1] → blue→white→red RGBA."""
+def _activation_color(value: float, highlight: bool = False) -> tuple:
     v = _clamp(value, 0.0, 1.0)
+    if highlight:
+        return (255, 220, 50, 255)
     if v < 0.5:
         t = v * 2
-        r, g, b = int(30 + t * 200), int(100 + t * 120), int(220 - t * 20)
-    else:
-        t = (v - 0.5) * 2
-        r, g, b = int(230 + t * 25), int(220 - t * 180), int(200 - t * 170)
-    return (r, g, b, 220)
+        return (int(30 + t*200), int(100 + t*120), int(220 - t*20), 220)
+    t = (v - 0.5) * 2
+    return (int(230 + t*25), int(220 - t*180), int(200 - t*170), 220)
 
 
-def _weight_color(value: float) -> tuple[int, int, int, int]:
-    """Map weight sign/magnitude → green (positive) / red (negative)."""
-    alpha = int(_clamp(abs(value) * 3, 0.05, 0.6) * 255)
-    if value >= 0:
-        return (50, 200, 80, alpha)
-    return (200, 60, 60, alpha)
+def _weight_color(value: float, highlight: bool = False) -> tuple:
+    if highlight:
+        return (255, 220, 50, 200)
+    alpha = int(_clamp(abs(value) * 3, 0.05, 0.55) * 255)
+    return (50, 200, 80, alpha) if value >= 0 else (200, 60, 60, alpha)
 
 
 @dataclass
@@ -79,167 +77,406 @@ def _compute_node_positions(
     canvas_y0: float,
     canvas_h: float,
 ) -> list[list[_NodePos]]:
-    """Compute (x, y) for every drawn node."""
     n_layers = len(layer_sizes)
-    x_step = canvas_w / (n_layers + 1)
+    x_step   = canvas_w / (n_layers + 1)
     positions = []
     for li, n in enumerate(layer_sizes):
-        x = x_step * (li + 1)
+        x      = x_step * (li + 1)
         y_step = canvas_h / (n + 1)
-        layer_pos = [_NodePos(x, canvas_y0 + y_step * (ni + 1)) for ni in range(n)]
-        positions.append(layer_pos)
+        positions.append([_NodePos(x, canvas_y0 + y_step * (ni + 1)) for ni in range(n)])
     return positions
 
+
+# ── App ───────────────────────────────────────────────────────────────────────
 
 class App:
     def __init__(self) -> None:
         self._stats: Optional[TrainStats] = None
-        self._lock = threading.Lock()
+        self._lock  = threading.Lock()
         self._trainer: Optional[Trainer] = None
 
-        # history for plots
-        self._loss_history: list[float] = []
+        self._loss_history:      list[float] = []
         self._batch_acc_history: list[float] = []
         self._epoch_acc_history: list[float] = []
-        self._val_acc_history: list[float] = []
-        self._step = 0
+        self._val_acc_history:   list[float] = []
+
+        # drawing pad state
+        self._draw_grid  = np.zeros((DRAW_GRID, DRAW_GRID), dtype=np.float32)
+        self._draw_dirty = False
+        self._infer_result: Optional[tuple] = None   # (pred, probs, acts, weights)
+
+        # highlighted nodes/edges from last inference
+        self._highlight_nodes:  list[set] = [set() for _ in range(4)]
+        self._highlight_edges:  list[set] = [set() for _ in range(3)]
+        self._inference_active  = False
+
+    # ── Theme ─────────────────────────────────────────────────────────────────
+
+    def _apply_theme(self) -> None:
+        with dpg.theme() as global_theme:
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg,       (10,  10,  15,  255))
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg,        (16,  16,  24,  255))
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBg,        (30,  30,  45,  255))
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, (45,  45,  65,  255))
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBg,        (5,   5,   10,  255))
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive,  (10,  10,  20,  255))
+                dpg.add_theme_color(dpg.mvThemeCol_Button,         (40,  60,  100, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered,  (60,  90,  150, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,   (80,  120, 200, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_Header,         (40,  55,  90,  255))
+                dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered,  (55,  75,  120, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_Text,           (210, 215, 230, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_Border,         (50,  55,  80,  255))
+                dpg.add_theme_color(dpg.mvThemeCol_ScrollbarBg,    (10,  10,  15,  255))
+                dpg.add_theme_color(dpg.mvThemeCol_TableBorderLight, (50, 55, 80, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_TableRowBg,     (18,  18,  28,  255))
+                dpg.add_theme_color(dpg.mvThemeCol_TableRowBgAlt,  (24,  24,  36,  255))
+                dpg.add_theme_style(dpg.mvStyleVar_WindowRounding,  4)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding,   4)
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing,     6, 5)
+        dpg.bind_theme(global_theme)
 
     # ── Build GUI ─────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
         dpg.create_context()
-        dpg.create_viewport(title="MNIST Neural Network Visualizer",
-                            width=WIN_W, height=WIN_H, resizable=False)
+        self._apply_theme()
+        dpg.create_viewport(
+            title="MNIST Neural Network Visualizer",
+            width=WIN_W, height=WIN_H,
+            resizable=False,
+            clear_color=(5, 5, 10, 255),
+        )
         dpg.setup_dearpygui()
 
-        with dpg.window(label="MNIST Visualizer", tag="main_win",
-                        width=WIN_W, height=WIN_H, no_resize=True,
-                        no_move=True, no_title_bar=True):
+        with dpg.window(tag="main_win", width=WIN_W, height=WIN_H,
+                        no_resize=True, no_move=True, no_title_bar=True,
+                        no_scrollbar=True):
 
-            # ── Top bar ───────────────────────────────────────────────────────
+            # ── Top control bar ───────────────────────────────────────────────
             with dpg.group(horizontal=True):
-                dpg.add_text("MNIST Neural Network Visualizer", color=(200, 220, 255))
+                dpg.add_text("MNIST Visualizer", color=(140, 170, 255))
+                dpg.add_spacer(width=16)
+                dpg.add_button(label="▶  Start", tag="btn_start",
+                               callback=self._on_start,
+                               width=90)
+                dpg.add_button(label="⏸  Pause", tag="btn_pause",
+                               callback=self._on_pause,
+                               width=90, enabled=False)
+                dpg.add_button(label="⏹  Stop", tag="btn_stop",
+                               callback=self._on_stop,
+                               width=90, enabled=False)
                 dpg.add_spacer(width=20)
-                dpg.add_button(label="Pause", tag="btn_pause",
-                               callback=self._on_pause)
-                dpg.add_button(label="Stop", tag="btn_stop",
-                               callback=self._on_stop)
-                dpg.add_spacer(width=30)
-                dpg.add_text("", tag="txt_status", color=(180, 255, 180))
+                dpg.add_text("Epochs:", color=(160, 160, 200))
+                dpg.add_input_int(tag="inp_epochs", default_value=20,
+                                  min_value=1, max_value=200,
+                                  width=70, step=0)
+                dpg.add_spacer(width=8)
+                dpg.add_text("Batch:", color=(160, 160, 200))
+                dpg.add_input_int(tag="inp_batch", default_value=64,
+                                  min_value=8, max_value=512,
+                                  width=70, step=0)
+                dpg.add_spacer(width=8)
+                dpg.add_text("LR:", color=(160, 160, 200))
+                dpg.add_input_float(tag="inp_lr", default_value=0.001,
+                                    min_value=1e-5, max_value=0.1,
+                                    format="%.4f", width=80, step=0)
+                dpg.add_spacer(width=20)
+                dpg.add_text("", tag="txt_status", color=(100, 220, 140))
 
             dpg.add_separator()
 
-            # ── Two-column layout ─────────────────────────────────────────────
+            # ── Three-panel row ───────────────────────────────────────────────
             with dpg.group(horizontal=True):
 
-                # Left: network graph canvas
-                with dpg.child_window(width=GRAPH_W, height=WIN_H - 60,
-                                      tag="graph_win", border=True):
-                    dpg.add_text("Network  (node colour = activation  |  edge = weight)",
-                                 color=(160, 160, 200))
-                    with dpg.drawlist(width=GRAPH_W - 10,
-                                      height=WIN_H - 100, tag="graph_canvas"):
-                        pass   # drawn dynamically
+                # ── Left: network graph ───────────────────────────────────────
+                with dpg.child_window(width=GRAPH_W, height=CONTENT_H,
+                                      tag="graph_win", border=True, no_scrollbar=True):
+                    dpg.add_text("Network  (node = activation  |  edge = weight)",
+                                 color=(120, 130, 190))
+                    dpg.add_separator()
+                    with dpg.drawlist(width=GRAPH_W - 12,
+                                      height=CONTENT_H - 36,
+                                      tag="graph_canvas"):
+                        pass
 
-                # Right: stats
-                with dpg.child_window(width=STATS_W, height=WIN_H - 60,
+                # ── Centre: stats ─────────────────────────────────────────────
+                with dpg.child_window(width=STATS_W, height=CONTENT_H,
                                       tag="stats_win", border=True):
-                    dpg.add_text("Training Statistics", color=(160, 160, 200))
-
-                    # counter line
+                    dpg.add_text("Training Statistics", color=(120, 130, 190))
                     dpg.add_text("Epoch: —   Batch: —   Loss: —   Acc: —",
-                                 tag="txt_counters", color=(220, 220, 100))
+                                 tag="txt_counters", color=(220, 200, 80))
                     dpg.add_text("Val accuracy: —",
-                                 tag="txt_val", color=(100, 220, 180))
-
+                                 tag="txt_val", color=(80, 200, 160))
                     dpg.add_separator()
 
-                    # Loss plot
-                    dpg.add_text("Loss", color=(200, 160, 100))
-                    with dpg.plot(height=PLOT_H, width=-1, tag="plot_loss",
-                                  no_title=True):
+                    dpg.add_text("Loss", color=(200, 140, 80))
+                    with dpg.plot(height=PLOT_H, width=-1, tag="plot_loss", no_title=True):
                         dpg.add_plot_axis(dpg.mvXAxis, label="step", tag="loss_x")
                         dpg.add_plot_axis(dpg.mvYAxis, label="loss", tag="loss_y")
                         dpg.add_line_series([], [], label="loss",
                                             parent="loss_y", tag="series_loss")
 
-                    # Accuracy plot
-                    dpg.add_text("Accuracy (%)", color=(100, 200, 160))
-                    with dpg.plot(height=PLOT_H, width=-1, tag="plot_acc",
-                                  no_title=True):
+                    dpg.add_text("Accuracy (%)", color=(80, 180, 140))
+                    with dpg.plot(height=PLOT_H, width=-1, tag="plot_acc", no_title=True):
                         dpg.add_plot_axis(dpg.mvXAxis, label="step", tag="acc_x")
-                        dpg.add_plot_axis(dpg.mvYAxis, label="%", tag="acc_y")
-                        dpg.add_line_series([], [], label="batch acc",
+                        dpg.add_plot_axis(dpg.mvYAxis, label="%",    tag="acc_y")
+                        dpg.add_line_series([], [], label="batch",
                                             parent="acc_y", tag="series_batch_acc")
-                        dpg.add_line_series([], [], label="epoch acc",
+                        dpg.add_line_series([], [], label="epoch",
                                             parent="acc_y", tag="series_epoch_acc")
-                        dpg.add_line_series([], [], label="val acc",
+                        dpg.add_line_series([], [], label="val",
                                             parent="acc_y", tag="series_val_acc")
                         dpg.add_plot_legend()
 
                     dpg.add_separator()
-
-                    # Per-layer table
-                    dpg.add_text("Per-layer stats", color=(160, 200, 220))
+                    dpg.add_text("Per-layer stats", color=(120, 170, 210))
                     with dpg.table(tag="layer_table", header_row=True,
                                    borders_innerH=True, borders_outerH=True,
                                    borders_innerV=True, borders_outerV=True,
                                    row_background=True):
-                        dpg.add_table_column(label="Layer")
-                        dpg.add_table_column(label="Act μ")
-                        dpg.add_table_column(label="Act σ")
-                        dpg.add_table_column(label="Dead %")
-                        dpg.add_table_column(label="W μ")
-                        dpg.add_table_column(label="∇W μ")
-
-                        for i, name in enumerate(["fc1 (→128)", "fc2 (→64)", "fc3 (→10)"]):
+                        for col in ["Layer", "Act μ", "Act σ", "Dead %", "W μ", "∇W μ"]:
+                            dpg.add_table_column(label=col)
+                        for i, name in enumerate(["fc1 →128", "fc2 →64", "fc3 →10"]):
                             with dpg.table_row(tag=f"row_{i}"):
-                                dpg.add_text(name, tag=f"cell_{i}_name")
-                                dpg.add_text("—", tag=f"cell_{i}_act_mean")
-                                dpg.add_text("—", tag=f"cell_{i}_act_std")
-                                dpg.add_text("—", tag=f"cell_{i}_dead")
-                                dpg.add_text("—", tag=f"cell_{i}_w_mean")
-                                dpg.add_text("—", tag=f"cell_{i}_grad")
+                                dpg.add_text(name,  tag=f"c{i}_name")
+                                dpg.add_text("—",   tag=f"c{i}_am")
+                                dpg.add_text("—",   tag=f"c{i}_as")
+                                dpg.add_text("—",   tag=f"c{i}_dead")
+                                dpg.add_text("—",   tag=f"c{i}_wm")
+                                dpg.add_text("—",   tag=f"c{i}_gm")
+
+                # ── Right: draw & recognise ───────────────────────────────────
+                with dpg.child_window(width=DRAW_W, height=CONTENT_H,
+                                      tag="draw_win", border=True):
+                    dpg.add_text("Draw a digit (0–9)", color=(120, 130, 190))
+                    dpg.add_separator()
+
+                    # drawing canvas
+                    with dpg.drawlist(width=DRAW_CANVAS_SZ, height=DRAW_CANVAS_SZ,
+                                      tag="draw_canvas"):
+                        pass
+
+                    dpg.add_spacer(height=6)
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="Clear",     width=100,
+                                       callback=self._on_clear_draw)
+                        dpg.add_button(label="Recognise", width=110,
+                                       callback=self._on_recognise,
+                                       tag="btn_recognise")
+
+                    dpg.add_spacer(height=8)
+                    dpg.add_text("", tag="txt_pred",  color=(255, 220, 80))
+                    dpg.add_spacer(height=4)
+
+                    # confidence bar chart
+                    with dpg.plot(height=160, width=DRAW_W - 24,
+                                  tag="plot_conf", no_title=True,
+                                  no_mouse_pos=True):
+                        dpg.add_plot_axis(dpg.mvXAxis, tag="conf_x", no_gridlines=True)
+                        dpg.set_axis_ticks("conf_x",
+                            tuple((str(i), float(i)) for i in range(10)))
+                        dpg.add_plot_axis(dpg.mvYAxis, tag="conf_y",
+                                          label="%", no_gridlines=True)
+                        dpg.set_axis_limits("conf_y", 0, 100)
+                        dpg.add_bar_series(list(range(10)), [0]*10,
+                                           weight=0.6,
+                                           parent="conf_y", tag="series_conf")
 
         dpg.set_primary_window("main_win", True)
 
-    # ── Callbacks ─────────────────────────────────────────────────────────────
+    # ── Top-bar callbacks ─────────────────────────────────────────────────────
+
+    def _on_start(self) -> None:
+        if self._trainer and self._trainer.is_running:
+            return
+        epochs     = dpg.get_value("inp_epochs")
+        batch_size = dpg.get_value("inp_batch")
+        lr         = float(dpg.get_value("inp_lr"))
+
+        self._trainer = Trainer(
+            on_step=self._on_step,
+            epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+        )
+        self._trainer.start()
+
+        dpg.configure_item("btn_start",  enabled=False)
+        dpg.configure_item("btn_pause",  enabled=True)
+        dpg.configure_item("btn_stop",   enabled=True)
+        dpg.configure_item("inp_epochs", enabled=False)
+        dpg.configure_item("inp_batch",  enabled=False)
+        dpg.configure_item("inp_lr",     enabled=False)
+        dpg.set_value("txt_status", "Training…")
 
     def _on_pause(self) -> None:
-        if self._trainer:
-            self._trainer.toggle_pause()
-            label = "Resume" if self._trainer.paused else "Pause"
-            dpg.set_item_label("btn_pause", label)
+        if not self._trainer:
+            return
+        self._trainer.toggle_pause()
+        if self._trainer.paused:
+            dpg.set_item_label("btn_pause", "▶  Resume")
+            dpg.set_value("txt_status", "Paused")
+        else:
+            dpg.set_item_label("btn_pause", "⏸  Pause")
+            dpg.set_value("txt_status", "Training…")
 
     def _on_stop(self) -> None:
         if self._trainer:
             self._trainer.stop()
+        dpg.configure_item("btn_start",  enabled=True)
+        dpg.configure_item("btn_pause",  enabled=False)
+        dpg.configure_item("btn_stop",   enabled=False)
+        dpg.configure_item("inp_epochs", enabled=True)
+        dpg.configure_item("inp_batch",  enabled=True)
+        dpg.configure_item("inp_lr",     enabled=True)
+        dpg.set_item_label("btn_pause",  "⏸  Pause")
+        dpg.set_value("txt_status", "Stopped")
 
-    # ── Stats receiver (called from trainer thread) ────────────────────────────
+    # ── Draw-pad callbacks ────────────────────────────────────────────────────
+
+    def _on_clear_draw(self) -> None:
+        self._draw_grid[:] = 0
+        self._draw_dirty   = True
+        self._infer_result = None
+        self._highlight_nodes = [set() for _ in range(4)]
+        self._highlight_edges = [set() for _ in range(3)]
+        self._inference_active = False
+        dpg.set_value("txt_pred", "")
+        dpg.set_value("series_conf", [list(range(10)), [0.0]*10])
+
+    def _on_recognise(self) -> None:
+        if self._trainer is None or self._trainer.model is None:
+            dpg.set_value("txt_pred", "Train the network first!")
+            return
+        if self._draw_grid.max() < 0.05:
+            dpg.set_value("txt_pred", "Draw a digit first!")
+            return
+
+        pred, probs, acts, weights = self._trainer.model.predict(self._draw_grid)
+        self._infer_result = (pred, probs, acts, weights)
+        self._inference_active = True
+
+        # compute decision-path highlights
+        self._compute_highlights(pred, acts, weights)
+
+        conf_pct = [float(p * 100) for p in probs]
+        dpg.set_value("txt_pred",
+            f"Prediction:  {pred}   ({conf_pct[pred]:.1f}% confidence)")
+        dpg.set_value("series_conf", [list(range(10)), conf_pct])
+        dpg.fit_axis_data("conf_x")
+
+    def _compute_highlights(self, pred: int, acts: list, weights: list) -> None:
+        """Find the top-N most influential nodes/edges for the predicted class."""
+        n_highlight = 4   # top nodes to highlight per layer
+
+        self._highlight_nodes = [set() for _ in range(4)]
+        self._highlight_edges = [set() for _ in range(3)]
+
+        # output layer — highlight the predicted class node
+        n_out     = _DRAW_SIZES[3]
+        step_out  = max(1, 10 // n_out)
+        out_idx   = min(pred // step_out, n_out - 1)
+        self._highlight_nodes[3].add(out_idx)
+
+        # backtrack through layers: for each highlighted dst node, find top src nodes
+        layer_acts_draw = [None] + [a for a in acts]  # index 0 = input (None)
+
+        for li in range(len(weights) - 1, -1, -1):
+            dst_set = self._highlight_nodes[li + 1]
+            n_src   = _DRAW_SIZES[li]
+            n_dst   = _DRAW_SIZES[li + 1]
+            W       = weights[li]
+            step_src = max(1, W.shape[1] // n_src)
+            step_dst = max(1, W.shape[0] // n_dst)
+
+            src_scores = np.zeros(n_src)
+            for di in dst_set:
+                w_row = W[di * step_dst, :]
+                for si in range(n_src):
+                    w_val = abs(float(w_row[si * step_src]))
+                    # weight importance × source activation (if available)
+                    act_val = 1.0
+                    if layer_acts_draw[li] is not None:
+                        a = layer_acts_draw[li]
+                        step_a = max(1, len(a) // n_src)
+                        act_val = max(0.0, float(a[min(si * step_a, len(a) - 1)]))
+                    src_scores[si] += w_val * act_val
+                    self._highlight_edges[li].add((si, di))
+
+            # keep only top-n_highlight source nodes
+            top_src = set(np.argsort(src_scores)[-n_highlight:].tolist())
+            self._highlight_nodes[li].update(top_src)
+            # prune edges to only those connecting highlighted src → highlighted dst
+            self._highlight_edges[li] = {
+                (si, di) for si, di in self._highlight_edges[li]
+                if si in top_src and di in dst_set
+            }
+
+    # ── Training step receiver ────────────────────────────────────────────────
 
     def _on_step(self, stats: TrainStats) -> None:
         with self._lock:
             self._stats = stats
 
-    # ── Per-frame render update ────────────────────────────────────────────────
+    # ── Per-frame render ──────────────────────────────────────────────────────
 
-    def _update(self) -> None:
-        with self._lock:
-            stats = self._stats
-            self._stats = None
-
-        if stats is None:
+    def _handle_drawing(self) -> None:
+        """Check if mouse is dragging over the draw canvas and paint pixels."""
+        if not dpg.is_item_hovered("draw_canvas"):
+            return
+        if not dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
             return
 
-        self._step += 1
+        mx, my = dpg.get_mouse_pos(local=False)
+        cx, cy = dpg.get_item_rect_min("draw_canvas")
+        px = int((mx - cx) / DRAW_PX)
+        py = int((my - cy) / DRAW_PX)
+
+        # paint with a soft 3×3 brush
+        for dy in range(-1, 2):
+            for dx in range(-1, 2):
+                nx, ny = px + dx, py + dy
+                if 0 <= nx < DRAW_GRID and 0 <= ny < DRAW_GRID:
+                    strength = 1.0 if (dx == 0 and dy == 0) else 0.5
+                    self._draw_grid[ny, nx] = min(1.0,
+                        self._draw_grid[ny, nx] + strength)
+        self._draw_dirty = True
+        # clear stale inference when user draws again
+        if self._inference_active:
+            self._inference_active = False
+            self._highlight_nodes  = [set() for _ in range(4)]
+            self._highlight_edges  = [set() for _ in range(3)]
+
+    def _render_draw_canvas(self) -> None:
+        dpg.delete_item("draw_canvas", children_only=True)
+        # background
+        dpg.draw_rectangle((0, 0), (DRAW_CANVAS_SZ, DRAW_CANVAS_SZ),
+                            fill=(20, 20, 30, 255), color=(40, 40, 60, 255),
+                            parent="draw_canvas")
+        # pixels
+        for row in range(DRAW_GRID):
+            for col in range(DRAW_GRID):
+                v = self._draw_grid[row, col]
+                if v < 0.02:
+                    continue
+                intensity = int(v * 255)
+                x0, y0 = col * DRAW_PX, row * DRAW_PX
+                dpg.draw_rectangle(
+                    (x0, y0), (x0 + DRAW_PX, y0 + DRAW_PX),
+                    fill=(intensity, intensity, min(255, intensity + 40), 255),
+                    color=(0, 0, 0, 0),
+                    parent="draw_canvas",
+                )
+
+    def _update_stats(self, stats: TrainStats) -> None:
         self._loss_history.append(stats.loss)
         self._batch_acc_history.append(stats.batch_accuracy)
         self._epoch_acc_history.append(stats.epoch_accuracy)
         self._val_acc_history.append(stats.val_accuracy)
-
         xs = list(range(len(self._loss_history)))
 
-        # counters
         dpg.set_value("txt_counters",
             f"Epoch: {stats.epoch}/{self._trainer._epochs}   "
             f"Batch: {stats.batch}/{stats.total_batches}   "
@@ -247,117 +484,137 @@ class App:
             f"Batch acc: {stats.batch_accuracy:.1f}%")
         dpg.set_value("txt_val", f"Val accuracy: {stats.val_accuracy:.2f}%")
 
-        # plots
-        dpg.set_value("series_loss",       [xs, self._loss_history])
-        dpg.set_value("series_batch_acc",  [xs, self._batch_acc_history])
-        dpg.set_value("series_epoch_acc",  [xs, self._epoch_acc_history])
-        dpg.set_value("series_val_acc",    [xs, self._val_acc_history])
+        dpg.set_value("series_loss",      [xs, self._loss_history])
+        dpg.set_value("series_batch_acc", [xs, self._batch_acc_history])
+        dpg.set_value("series_epoch_acc", [xs, self._epoch_acc_history])
+        dpg.set_value("series_val_acc",   [xs, self._val_acc_history])
         dpg.fit_axis_data("loss_x"); dpg.fit_axis_data("loss_y")
         dpg.fit_axis_data("acc_x");  dpg.fit_axis_data("acc_y")
 
-        # per-layer table
         for i, ls in enumerate(stats.layer_stats):
-            dead_color = (255, 100, 100) if ls.dead_neurons_pct > 20 else (200, 220, 200)
-            dpg.set_value(f"cell_{i}_act_mean", f"{ls.activations_mean:.4f}")
-            dpg.set_value(f"cell_{i}_act_std",  f"{ls.activations_std:.4f}")
-            dpg.configure_item(f"cell_{i}_dead", color=dead_color)
-            dpg.set_value(f"cell_{i}_dead",     f"{ls.dead_neurons_pct:.1f}%")
-            dpg.set_value(f"cell_{i}_w_mean",   f"{ls.weights_mean:.4f}")
-            dpg.set_value(f"cell_{i}_grad",
+            dead_col = (255, 90, 90) if ls.dead_neurons_pct > 20 else (170, 210, 170)
+            dpg.set_value(f"c{i}_am",   f"{ls.activations_mean:.4f}")
+            dpg.set_value(f"c{i}_as",   f"{ls.activations_std:.4f}")
+            dpg.configure_item(f"c{i}_dead", color=dead_col)
+            dpg.set_value(f"c{i}_dead", f"{ls.dead_neurons_pct:.1f}%")
+            dpg.set_value(f"c{i}_wm",   f"{ls.weights_mean:.4f}")
+            dpg.set_value(f"c{i}_gm",
                 f"{ls.grad_mean:.5f}" if ls.grad_mean else "—")
 
-        # network graph
-        self._draw_network(stats)
+        self._draw_network(stats.activations, stats.weights)
 
-    def _draw_network(self, stats: TrainStats) -> None:
+        # check if training finished
+        if not self._trainer.is_running:
+            self._on_stop()
+            dpg.set_value("txt_status", "Done ✓")
+
+    def _draw_network(
+        self,
+        activations: list,
+        weights: list,
+        highlight_nodes: Optional[list] = None,
+        highlight_edges: Optional[list] = None,
+    ) -> None:
         dpg.delete_item("graph_canvas", children_only=True)
 
-        canvas_w = GRAPH_W - 10
-        canvas_h = WIN_H - 110
+        canvas_w = GRAPH_W - 12
+        canvas_h = CONTENT_H - 36
         y0 = 5
 
-        positions = _compute_node_positions(
-            _DRAW_SIZES, canvas_w, y0, canvas_h - y0
-        )
+        positions = _compute_node_positions(_DRAW_SIZES, canvas_w, y0, canvas_h - y0 - 25)
 
-        # ── Draw edges (sampled for performance) ──────────────────────────────
-        if stats.weights:
+        hl_nodes = highlight_nodes or self._highlight_nodes
+        hl_edges = highlight_edges or self._highlight_edges
+
+        # edges
+        if weights:
             for li in range(len(positions) - 1):
                 src_pos = positions[li]
                 dst_pos = positions[li + 1]
-                W = stats.weights[li] if li < len(stats.weights) else None
+                W = weights[li] if li < len(weights) else None
                 if W is None:
                     continue
-
                 n_src = len(src_pos)
                 n_dst = len(dst_pos)
-
-                # map W rows=dst, cols=src  →  subsample indices
                 step_src = max(1, W.shape[1] // n_src)
                 step_dst = max(1, W.shape[0] // n_dst)
 
                 for di, dp_ in enumerate(dst_pos):
                     w_row = W[di * step_dst, :]
                     for si, sp in enumerate(src_pos):
+                        is_hl = (si, di) in hl_edges[li]
                         w_val = float(w_row[si * step_src])
-                        col = _weight_color(w_val)
-                        thickness = _clamp(abs(w_val) * 2, 0.3, 2.5)
+                        col   = _weight_color(w_val, highlight=is_hl)
+                        thick = 3.0 if is_hl else _clamp(abs(w_val) * 2, 0.3, 2.0)
                         dpg.draw_line(
                             (sp.x, sp.y), (dp_.x, dp_.y),
-                            color=col, thickness=thickness,
+                            color=col, thickness=thick,
                             parent="graph_canvas",
                         )
 
-        # ── Draw nodes ────────────────────────────────────────────────────────
-        layer_acts: list[Optional[np.ndarray]] = []
-        # input layer has no activation stats — use uniform grey
-        layer_acts.append(None)
-        for a in stats.activations:
-            layer_acts.append(a)
-
+        # nodes
+        layer_acts = [None] + list(activations)
         for li, (layer_pos, acts) in enumerate(zip(positions, layer_acts)):
             n_full = _DRAW_SIZES[li]
             for ni, pos in enumerate(layer_pos):
+                is_hl = ni in hl_nodes[li]
                 if acts is not None and len(acts) > 0:
                     step = max(1, len(acts) // n_full)
-                    raw = float(acts[min(ni * step, len(acts) - 1)])
-                    # normalise to [0,1] using tanh
+                    raw  = float(acts[min(ni * step, len(acts) - 1)])
                     norm = (math.tanh(raw) + 1) / 2
-                    col = _activation_color(norm)
+                    col  = _activation_color(norm, highlight=is_hl)
                 else:
-                    col = (120, 130, 160, 200)
+                    col = (255, 220, 50, 255) if is_hl else (80, 90, 120, 200)
 
+                outline = (255, 255, 100, 255) if is_hl else (200, 210, 255, 80)
+                radius  = NODE_R + 2 if is_hl else NODE_R
                 dpg.draw_circle(
-                    center=(pos.x, pos.y), radius=NODE_R,
-                    color=(255, 255, 255, 80),
-                    fill=col,
+                    center=(pos.x, pos.y), radius=radius,
+                    color=outline, fill=col,
                     parent="graph_canvas",
                 )
 
-        # ── Layer labels ─────────────────────────────────────────────────────
+        # layer labels
         n_layers = len(positions)
-        x_step = canvas_w / (n_layers + 1)
+        x_step   = (canvas_w) / (n_layers + 1)
         for li, label in enumerate(_LAYER_NAMES):
             x = x_step * (li + 1)
             dpg.draw_text(
-                (x - 25, canvas_h - 20), label.replace("\n", " "),
-                color=(180, 190, 220), size=12,
+                (x - 30, canvas_h - 18), label,
+                color=(140, 150, 200), size=11,
                 parent="graph_canvas",
             )
 
-    # ── Main ─────────────────────────────────────────────────────────────────
+    # ── Main loop ─────────────────────────────────────────────────────────────
 
     def run(self) -> None:
         self._build()
         dpg.show_viewport()
 
-        self._trainer = Trainer(on_step=self._on_step)
-        self._trainer.start()
-
-        dpg.set_value("txt_status", "Training…")
+        # draw empty canvas + empty network on startup
+        self._render_draw_canvas()
+        self._draw_network([], [])
 
         while dpg.is_dearpygui_running():
-            self._update()
+            # handle mouse drawing
+            self._handle_drawing()
+            if self._draw_dirty:
+                self._render_draw_canvas()
+                self._draw_dirty = False
+
+            # consume latest training stats
+            with self._lock:
+                stats = self._stats
+                self._stats = None
+
+            if stats is not None:
+                self._update_stats(stats)
+            elif self._inference_active and not stats:
+                # re-draw network with inference highlights (no training stats)
+                if self._infer_result:
+                    _, _, acts, weights = self._infer_result
+                    self._draw_network(acts, weights)
+
             dpg.render_dearpygui_frame()
 
         if self._trainer:

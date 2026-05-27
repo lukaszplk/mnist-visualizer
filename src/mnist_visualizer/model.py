@@ -80,6 +80,29 @@ class MLP(nn.Module):
         x = self.fc3(x)
         return x
 
+    def predict(self, image_28x28: "np.ndarray") -> tuple[int, "np.ndarray", list, list]:
+        """Run inference on a single 28x28 float32 image (values 0-1).
+
+        Returns
+        -------
+        predicted_class : int
+        probabilities   : np.ndarray  shape (10,)
+        activations     : list of np.ndarray, one per layer
+        weights         : list of np.ndarray, one per layer
+        """
+        import numpy as np
+        self.eval()
+        with torch.no_grad():
+            t = torch.tensor(image_28x28, dtype=torch.float32).unsqueeze(0)
+            # normalise same as training
+            t = (t - 0.1307) / 0.3081
+            logits = self(t)
+            probs = torch.softmax(logits, dim=1).squeeze().numpy()
+            pred  = int(probs.argmax())
+        self.train()
+        _, act_arrays, weight_arrays = self.collect_stats()
+        return pred, probs, act_arrays, weight_arrays
+
     def collect_stats(self) -> tuple[list[LayerStats], list, list]:
         """Build LayerStats + raw activation/weight arrays from last forward pass."""
         layers = [self.fc1, self.fc2, self.fc3]
