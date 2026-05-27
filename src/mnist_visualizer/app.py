@@ -45,7 +45,7 @@ _ROLLING_N     = 20               # window for rolling avg / std
 _DS_COLS       = 5
 _DS_ROWS       = 5
 _DS_N          = _DS_COLS * _DS_ROWS   # 25 images per page
-_IMG_SZ        = 64                    # display size per image (pixels)
+_IMG_SZ        = 84                    # display size per image (pixels)
 _METRICS        = ["Activation value", "Running average", "Rolling std"]
 _WEIGHT_METRICS = ["Weight mean", "Weight std"]
 DRAW_GRID      = 28
@@ -729,27 +729,33 @@ class App:
         """Convert a (28,28) float32 MNIST image to a flat RGBA float list at _IMG_SZ."""
         import numpy as _np
         try:
-            from PIL import Image as _PILImage
+            from PIL import Image as _PILImage, ImageFilter as _IFilter
+            # 1. upscale with bicubic for smooth edges
             pil = _PILImage.fromarray((_np.clip(img, 0, 1) * 255).astype(_np.uint8), mode="L")
-            pil = pil.resize((_IMG_SZ, _IMG_SZ), _PILImage.LANCZOS)
+            pil = pil.resize((_IMG_SZ, _IMG_SZ), _PILImage.BICUBIC)
+            # 2. mild smooth pass to eliminate any remaining block artefacts
+            pil = pil.filter(_IFilter.SMOOTH)
             arr = _np.asarray(pil).astype(_np.float32) / 255.0
         except ImportError:
-            # fallback: nearest-neighbour via repeat
-            factor = _IMG_SZ / 28
-            arr = _np.repeat(_np.repeat(img, int(factor), axis=0),
-                             int(factor), axis=1).astype(_np.float32)
+            # fallback: bilinear via scipy if available, else nearest-neighbour
+            try:
+                from scipy.ndimage import zoom as _zoom
+                arr = _zoom(img.astype(_np.float32),
+                            _IMG_SZ / 28, order=1)[:_IMG_SZ, :_IMG_SZ]
+            except ImportError:
+                arr = _np.repeat(_np.repeat(img, _IMG_SZ // 28, axis=0),
+                                 _IMG_SZ // 28, axis=1).astype(_np.float32)
             arr = arr[:_IMG_SZ, :_IMG_SZ]
-            if arr.shape[0] < _IMG_SZ or arr.shape[1] < _IMG_SZ:
-                pad = _np.zeros((_IMG_SZ, _IMG_SZ), dtype=_np.float32)
-                pad[:arr.shape[0], :arr.shape[1]] = arr
-                arr = pad
+            pad = _np.zeros((_IMG_SZ, _IMG_SZ), dtype=_np.float32)
+            pad[:arr.shape[0], :arr.shape[1]] = arr
+            arr = pad
 
-        # gamma for visibility
-        arr = _np.clip(arr ** 0.5, 0.0, 1.0)
-        # tint: white digit on near-black background (slight blue tint)
+        # gamma lift so mid-grey strokes become clearly visible
+        arr = _np.clip(arr ** 0.55, 0.0, 1.0)
+        # slight blue tint on the bright pixels
         r = arr
         g = arr
-        b = _np.clip(arr + 0.08, 0, 1)
+        b = _np.clip(arr + 0.10, 0.0, 1.0)
         a = _np.ones((_IMG_SZ, _IMG_SZ), dtype=_np.float32)
         return _np.stack([r, g, b, a], axis=-1).ravel().tolist()
 
