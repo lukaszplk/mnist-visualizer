@@ -154,6 +154,10 @@ class App:
         self._node_metric:   str = _METRICS[0]
         self._weight_metric: str = _WEIGHT_METRICS[0]
 
+        # per-layer node filters: list of visible draw-indices (None = show all)
+        self._node_filter:   list[Optional[set]] = [None, None, None]
+        self._weight_filter: list[Optional[set]] = [None, None, None]
+
         # dataset browser
         self._dataset          = None   # loaded lazily
         self._ds_offset        = 0
@@ -381,12 +385,27 @@ class App:
                             dpg.add_separator()
 
                             _layer_labels = [
-                                ("fc1  (128 nodes, 16 shown)", 180),
-                                ("fc2  (64 nodes, 16 shown)",  160),
-                                ("fc3 / Output  (10 nodes)",   160),
+                                ("fc1  (128 nodes, 16 shown)", 175),
+                                ("fc2  (64 nodes, 16 shown)",  155),
+                                ("fc3 / Output  (10 nodes)",   155),
                             ]
                             for li, (lbl, ph) in enumerate(_layer_labels):
-                                dpg.add_text(lbl, color=(160, 170, 220))
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text(lbl, color=(160, 170, 220))
+                                    dpg.add_spacer(width=8)
+                                    dpg.add_text("show:", color=(120, 120, 160))
+                                    dpg.add_input_text(
+                                        tag=f"inp_node_filter_{li}",
+                                        hint=f"0–{_NODE_SHOWN[li]-1}, empty=all",
+                                        width=130, on_enter=True,
+                                        callback=lambda s, a, u=li:
+                                            self._apply_filter(u, a, "node"),
+                                    )
+                                    dpg.add_button(
+                                        label="all", width=32,
+                                        callback=lambda s, a, u=li:
+                                            self._clear_filter(u, "node"),
+                                    )
                                 with dpg.plot(height=ph, width=-1,
                                               tag=f"plot_nodes_{li}",
                                               no_title=True):
@@ -414,8 +433,7 @@ class App:
                                             f"node_series_{li}_{ni}",
                                             self._make_line_theme(col),
                                         )
-                                    if li == 2:
-                                        dpg.add_plot_legend()
+                                    dpg.add_plot_legend()
 
                         # ── Tab 3: Weights per node ───────────────────────────
                         with dpg.tab(label="Weights"):
@@ -434,12 +452,27 @@ class App:
                             dpg.add_separator()
 
                             _wlayer_labels = [
-                                ("fc1  (128 nodes, 16 shown)", 180),
-                                ("fc2  (64 nodes, 16 shown)",  160),
-                                ("fc3 / Output  (10 nodes)",   160),
+                                ("fc1  (128 nodes, 16 shown)", 175),
+                                ("fc2  (64 nodes, 16 shown)",  155),
+                                ("fc3 / Output  (10 nodes)",   155),
                             ]
                             for li, (lbl, ph) in enumerate(_wlayer_labels):
-                                dpg.add_text(lbl, color=(160, 170, 220))
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text(lbl, color=(160, 170, 220))
+                                    dpg.add_spacer(width=8)
+                                    dpg.add_text("show:", color=(120, 120, 160))
+                                    dpg.add_input_text(
+                                        tag=f"inp_weight_filter_{li}",
+                                        hint=f"0–{_NODE_SHOWN[li]-1}, empty=all",
+                                        width=130, on_enter=True,
+                                        callback=lambda s, a, u=li:
+                                            self._apply_filter(u, a, "weight"),
+                                    )
+                                    dpg.add_button(
+                                        label="all", width=32,
+                                        callback=lambda s, a, u=li:
+                                            self._clear_filter(u, "weight"),
+                                    )
                                 with dpg.plot(height=ph, width=-1,
                                               tag=f"wplot_{li}",
                                               no_title=True):
@@ -467,8 +500,7 @@ class App:
                                             f"wseries_{li}_{ni}",
                                             self._make_line_theme(col),
                                         )
-                                    if li == 2:
-                                        dpg.add_plot_legend()
+                                    dpg.add_plot_legend()
 
                         # ── Tab 4: Dataset ───────────────────────────────────
                         with dpg.tab(label="Dataset"):
@@ -765,6 +797,44 @@ class App:
             pred, *_ = self._trainer.model.predict(img)
             self._ds_preds.append(pred)
         self._ds_needs_refresh = True
+
+    # ── Node / weight filter ─────────────────────────────────────────────────
+
+    def _apply_filter(self, li: int, text: str, kind: str) -> None:
+        """Parse comma-separated indices and show/hide series accordingly."""
+        text = text.strip()
+        if not text:
+            self._clear_filter(li, kind)
+            return
+        try:
+            indices = {int(x.strip()) for x in text.split(",") if x.strip()}
+        except ValueError:
+            return  # ignore bad input
+
+        n = _NODE_SHOWN[li]
+        if kind == "node":
+            self._node_filter[li] = indices
+            for ni in range(n):
+                dpg.configure_item(f"node_series_{li}_{ni}",
+                                   show=(ni in indices))
+        else:
+            self._weight_filter[li] = indices
+            for ni in range(n):
+                dpg.configure_item(f"wseries_{li}_{ni}",
+                                   show=(ni in indices))
+
+    def _clear_filter(self, li: int, kind: str) -> None:
+        n = _NODE_SHOWN[li]
+        if kind == "node":
+            self._node_filter[li] = None
+            dpg.set_value(f"inp_node_filter_{li}", "")
+            for ni in range(n):
+                dpg.configure_item(f"node_series_{li}_{ni}", show=True)
+        else:
+            self._weight_filter[li] = None
+            dpg.set_value(f"inp_weight_filter_{li}", "")
+            for ni in range(n):
+                dpg.configure_item(f"wseries_{li}_{ni}", show=True)
 
     # ── Metrics / confusion matrix ────────────────────────────────────────────
 
