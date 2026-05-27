@@ -34,10 +34,18 @@ CONTENT_H      = WIN_H - 90   # updated dynamically
 NODE_R         = 7
 DRAW_PX        = 9          # screen pixels per MNIST pixel
 
-# node-activity chart: how many nodes to show per layer and history length
+# node-activity chart
 _NODE_SHOWN    = [16, 16, 10]     # fc1, fc2, fc3
-_NODE_STEPS    = [8,   4,  1]     # sampling stride (128/16, 64/16, 10/10)
-_HIST_LEN      = 300              # batches kept in rolling window
+_NODE_STEPS    = [8,   4,  1]     # sampling stride
+_HIST_LEN      = 300              # batches in rolling window
+_ROLLING_N     = 20               # window for rolling avg / std
+
+# dataset browser
+_DS_COLS       = 5
+_DS_ROWS       = 5
+_DS_N          = _DS_COLS * _DS_ROWS   # 25 images per page
+_IMG_SZ        = 56                    # display size per image (pixels)
+_METRICS       = ["Activation value", "Running average", "Rolling std"]
 DRAW_GRID      = 28
 DRAW_CANVAS_SZ = DRAW_PX * DRAW_GRID   # 252
 
@@ -125,10 +133,22 @@ class App:
         self._draw_w    = WIN_W - self._graph_w - self._stats_w - 30
         self._content_h = WIN_H - 90
 
-        # per-node activation history: [layer][node] → list of floats
+        # per-node histories: [layer][node] → list of floats
         self._node_act_history: list[list[list[float]]] = [
             [[] for _ in range(_NODE_SHOWN[li])] for li in range(3)
         ]
+        self._node_avg_history: list[list[list[float]]] = [
+            [[] for _ in range(_NODE_SHOWN[li])] for li in range(3)
+        ]
+        self._node_std_history: list[list[list[float]]] = [
+            [[] for _ in range(_NODE_SHOWN[li])] for li in range(3)
+        ]
+        self._node_metric: str = _METRICS[0]
+
+        # dataset browser
+        self._dataset       = None   # loaded lazily
+        self._ds_offset     = 0
+        self._ds_preds: list[int] = []   # predictions for current page
 
         # highlighted nodes/edges from last inference
         self._highlight_nodes:  list[set] = [set() for _ in range(4)]
@@ -214,6 +234,14 @@ class App:
             clear_color=(5, 5, 10, 255),
         )
         dpg.setup_dearpygui()
+
+        # texture registry for dataset images (must exist before window)
+        with dpg.texture_registry(tag="tex_registry"):
+            placeholder = [0.12, 0.12, 0.18, 1.0] * (_IMG_SZ * _IMG_SZ)
+            for i in range(_DS_N):
+                dpg.add_raw_texture(_IMG_SZ, _IMG_SZ, placeholder,
+                                    tag=f"tex_ds_{i}",
+                                    format=dpg.mvFormat_Float_rgba)
 
         with dpg.window(tag="main_win",
                         no_resize=True, no_move=True, no_title_bar=True,
@@ -320,10 +348,18 @@ class App:
 
                         # ── Tab 2: Node Activity ──────────────────────────────
                         with dpg.tab(label="Node Activity"):
-                            dpg.add_text(
-                                "Activation per node over batches  "
-                                "(sampled: 16 / 16 / 10 nodes)",
-                                color=(140, 150, 200))
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Metric:", color=(160, 160, 200))
+                                dpg.add_combo(
+                                    _METRICS,
+                                    default_value=_METRICS[0],
+                                    tag="combo_metric",
+                                    width=180,
+                                    callback=self._on_metric_change,
+                                )
+                                dpg.add_text(
+                                    "  (sampled: 16 / 16 / 10 nodes)",
+                                    color=(100, 110, 150))
                             dpg.add_separator()
 
                             _layer_labels = [
@@ -362,6 +398,42 @@ class App:
                                         )
                                     if li == 2:
                                         dpg.add_plot_legend()
+
+                        # ── Tab 3: Dataset ────────────────────────────────────
+                        with dpg.tab(label="Dataset"):
+                            with dpg.group(horizontal=True):
+                                dpg.add_button(label="◀ Prev", width=70,
+                                               callback=self._on_ds_prev)
+                                dpg.add_button(label="Next ▶", width=70,
+                                               callback=self._on_ds_next)
+                                dpg.add_spacer(width=8)
+                                dpg.add_button(label="Predict page",
+                                               width=100,
+                                               tag="btn_ds_predict",
+                                               callback=self._on_ds_predict)
+                                dpg.add_spacer(width=8)
+                                dpg.add_text("", tag="txt_ds_page",
+                                             color=(160, 160, 200))
+                            dpg.add_separator()
+
+                            # 5×5 image grid
+                            for row in range(_DS_ROWS):
+                                with dpg.group(horizontal=True):
+                                    for col in range(_DS_COLS):
+                                        idx = row * _DS_COLS + col
+                                        with dpg.group():
+                                            dpg.add_image(
+                                                f"tex_ds_{idx}",
+                                                width=_IMG_SZ,
+                                                height=_IMG_SZ,
+                                                tag=f"img_ds_{idx}",
+                                            )
+                                            dpg.add_text(
+                                                "—",
+                                                tag=f"lbl_ds_{idx}",
+                                                color=(200, 200, 160),
+                                            )
+                                        dpg.add_spacer(width=4)
 
                 # ── Right: draw & recognise ───────────────────────────────────
                 with dpg.child_window(width=self._draw_w, height=self._content_h,
@@ -449,6 +521,123 @@ class App:
         dpg.configure_item("inp_lr",     enabled=True)
         dpg.set_item_label("btn_pause",  "⏸  Pause")
         dpg.set_value("txt_status", "Stopped")
+
+    # ── Dataset callbacks ─────────────────────────────────────────────────────
+
+    def _ensure_dataset(self) -> bool:
+        if self._dataset is not None:
+            return True
+        try:
+            from torchvision import datasets, transforms
+            from pathlib import Path
+            t = transforms.ToTensor()
+            self._dataset = datasets.MNIST(
+                Path.home() / ".cache" / "mnist_visualizer",
+                train=False, download=True, transform=t,
+            )
+            self._update_dataset_display()
+            return True
+        except Exception:
+            return False
+
+    def _update_dataset_display(self) -> None:
+        if self._dataset is None:
+            return
+        n = len(self._dataset)
+        dpg.set_value("txt_ds_page",
+            f"Images {self._ds_offset}–{min(self._ds_offset + _DS_N, n) - 1}  of {n}")
+
+        for i in range(_DS_N):
+            ds_idx = self._ds_offset + i
+            if ds_idx >= n:
+                # blank out
+                blank = [0.1, 0.1, 0.15, 1.0] * (_IMG_SZ * _IMG_SZ)
+                dpg.set_value(f"tex_ds_{i}", blank)
+                dpg.set_value(f"lbl_ds_{i}", "—")
+                continue
+
+            img_tensor, label = self._dataset[ds_idx]
+            # img_tensor: (1, 28, 28) float [0,1]
+            img = img_tensor.squeeze().numpy()
+            # upscale 28→56 with nearest neighbour
+            scale = _IMG_SZ // 28
+            img_up = img.repeat(scale, axis=0).repeat(scale, axis=1)
+            # build RGBA flat float list
+            rgba = []
+            for pv in img_up.ravel():
+                rgba += [float(pv), float(pv), float(min(pv * 1.15, 1.0)), 1.0]
+            dpg.set_value(f"tex_ds_{i}", rgba)
+
+            # label text
+            pred_part = ""
+            if i < len(self._ds_preds):
+                p = self._ds_preds[i]
+                tick = "✓" if p == label else "✗"
+                color_tag = (100, 220, 100) if p == label else (220, 80, 80)
+                dpg.configure_item(f"lbl_ds_{i}", color=color_tag)
+                pred_part = f"→{p}{tick}"
+            else:
+                dpg.configure_item(f"lbl_ds_{i}", color=(200, 200, 160))
+            dpg.set_value(f"lbl_ds_{i}", f"{label} {pred_part}")
+
+    def _on_ds_prev(self) -> None:
+        self._ds_preds = []
+        if not self._ensure_dataset():
+            return
+        self._ds_offset = max(0, self._ds_offset - _DS_N)
+        self._update_dataset_display()
+
+    def _on_ds_next(self) -> None:
+        self._ds_preds = []
+        if not self._ensure_dataset():
+            return
+        n = len(self._dataset)
+        self._ds_offset = min(self._ds_offset + _DS_N, n - _DS_N)
+        self._update_dataset_display()
+
+    def _on_ds_predict(self) -> None:
+        if not self._ensure_dataset():
+            return
+        if self._trainer is None or self._trainer.model is None:
+            dpg.set_value("txt_ds_page", "Train the network first!")
+            return
+        import numpy as np
+        self._ds_preds = []
+        n = len(self._dataset)
+        for i in range(_DS_N):
+            ds_idx = self._ds_offset + i
+            if ds_idx >= n:
+                break
+            img_tensor, _ = self._dataset[ds_idx]
+            img = img_tensor.squeeze().numpy()
+            pred, *_ = self._trainer.model.predict(img)
+            self._ds_preds.append(pred)
+        self._update_dataset_display()
+
+    # ── Node metric callback ──────────────────────────────────────────────────
+
+    def _on_metric_change(self, sender, app_data) -> None:
+        self._node_metric = app_data
+        self._refresh_node_series()
+
+    def _refresh_node_series(self) -> None:
+        """Re-push all node series from the correct history array."""
+        step_idx = len(self._node_act_history[0][0])
+        if step_idx == 0:
+            return
+        hist_map = {
+            _METRICS[0]: self._node_act_history,
+            _METRICS[1]: self._node_avg_history,
+            _METRICS[2]: self._node_std_history,
+        }
+        src = hist_map.get(self._node_metric, self._node_act_history)
+        for li in range(3):
+            hist_len = len(src[li][0])
+            xs = list(range(step_idx - hist_len, step_idx))
+            for ni in range(_NODE_SHOWN[li]):
+                dpg.set_value(f"node_series_{li}_{ni}", [xs, src[li][ni]])
+            dpg.fit_axis_data(f"node_x_{li}")
+            dpg.fit_axis_data(f"node_y_{li}")
 
     # ── Draw-pad callbacks ────────────────────────────────────────────────────
 
@@ -608,23 +797,45 @@ class App:
         dpg.fit_axis_data("acc_x");  dpg.fit_axis_data("acc_y")
 
         # ── node activity history ─────────────────────────────────────────────
+        import numpy as _np
         step_idx = len(self._loss_history)
         for li, acts in enumerate(stats.activations):
-            n = _NODE_SHOWN[li]
+            n      = _NODE_SHOWN[li]
             stride = _NODE_STEPS[li]
             for ni in range(n):
                 node_real_idx = min(ni * stride, len(acts) - 1)
                 val = float(acts[node_real_idx])
+
+                # raw value
                 hist = self._node_act_history[li][ni]
                 hist.append(val)
                 if len(hist) > _HIST_LEN:
                     hist.pop(0)
-            # update all series for this layer at once
-            hist_len = len(self._node_act_history[li][0])
+
+                # rolling average
+                window = hist[-_ROLLING_N:]
+                self._node_avg_history[li][ni].append(float(_np.mean(window)))
+                if len(self._node_avg_history[li][ni]) > _HIST_LEN:
+                    self._node_avg_history[li][ni].pop(0)
+
+                # rolling std
+                self._node_std_history[li][ni].append(
+                    float(_np.std(window)) if len(window) > 1 else 0.0)
+                if len(self._node_std_history[li][ni]) > _HIST_LEN:
+                    self._node_std_history[li][ni].pop(0)
+
+        # push the currently selected metric to the chart
+        hist_map = {
+            _METRICS[0]: self._node_act_history,
+            _METRICS[1]: self._node_avg_history,
+            _METRICS[2]: self._node_std_history,
+        }
+        src = hist_map.get(self._node_metric, self._node_act_history)
+        for li in range(len(stats.activations)):
+            hist_len = len(src[li][0])
             xs_node  = list(range(step_idx - hist_len, step_idx))
-            for ni in range(n):
-                dpg.set_value(f"node_series_{li}_{ni}",
-                              [xs_node, self._node_act_history[li][ni]])
+            for ni in range(_NODE_SHOWN[li]):
+                dpg.set_value(f"node_series_{li}_{ni}", [xs_node, src[li][ni]])
             dpg.fit_axis_data(f"node_x_{li}")
             dpg.fit_axis_data(f"node_y_{li}")
 
@@ -731,6 +942,9 @@ class App:
         # draw empty canvas + empty network on startup
         self._render_draw_canvas()
         self._draw_network([], [])
+
+        # load dataset in background so Dataset tab is ready immediately
+        threading.Thread(target=self._ensure_dataset, daemon=True).start()
 
         while dpg.is_dearpygui_running():
             # handle viewport resize
