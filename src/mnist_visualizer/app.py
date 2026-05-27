@@ -24,13 +24,12 @@ import numpy as np
 from .model import TrainStats
 from .trainer import Trainer
 
-# ── Layout ────────────────────────────────────────────────────────────────────
+# ── Layout (initial defaults — recalculated on resize) ────────────────────────
 WIN_W, WIN_H   = 1580, 800
-GRAPH_W        = 460
-STATS_W        = 580
-DRAW_W         = WIN_W - GRAPH_W - STATS_W - 30
-PLOT_H         = 165
-CONTENT_H      = WIN_H - 90
+_GRAPH_RATIO   = 0.29     # fraction of viewport width
+_STATS_RATIO   = 0.37
+# draw panel gets the remainder
+CONTENT_H      = WIN_H - 90   # updated dynamically
 
 NODE_R         = 7
 DRAW_PX        = 9          # screen pixels per MNIST pixel
@@ -118,6 +117,14 @@ class App:
         self._draw_dirty = False
         self._infer_result: Optional[tuple] = None   # (pred, probs, acts, weights)
 
+        # dynamic layout (updated on resize)
+        self._vp_w      = WIN_W
+        self._vp_h      = WIN_H
+        self._graph_w   = int(WIN_W * _GRAPH_RATIO)
+        self._stats_w   = int(WIN_W * _STATS_RATIO)
+        self._draw_w    = WIN_W - self._graph_w - self._stats_w - 30
+        self._content_h = WIN_H - 90
+
         # per-node activation history: [layer][node] → list of floats
         self._node_act_history: list[list[list[float]]] = [
             [[] for _ in range(_NODE_SHOWN[li])] for li in range(3)
@@ -137,6 +144,36 @@ class App:
                 dpg.add_theme_color(dpg.mvPlotCol_Line, color,
                                     category=dpg.mvThemeCat_Plots)
         return t
+
+    # ── Resize ────────────────────────────────────────────────────────────────
+
+    def _resize(self, vp_w: int, vp_h: int) -> None:
+        self._vp_w      = vp_w
+        self._vp_h      = vp_h
+        self._graph_w   = int(vp_w * _GRAPH_RATIO)
+        self._stats_w   = int(vp_w * _STATS_RATIO)
+        self._draw_w    = vp_w - self._graph_w - self._stats_w - 30
+        self._content_h = vp_h - 90
+
+        ph = max(120, int(self._content_h * 0.21))   # proportional plot height
+
+        dpg.set_item_width( "graph_win",    self._graph_w)
+        dpg.set_item_height("graph_win",    self._content_h)
+        dpg.set_item_width( "graph_canvas", self._graph_w - 12)
+        dpg.set_item_height("graph_canvas", self._content_h - 36)
+
+        dpg.set_item_width( "stats_win",    self._stats_w)
+        dpg.set_item_height("stats_win",    self._content_h)
+
+        dpg.set_item_width( "draw_win",     self._draw_w)
+        dpg.set_item_height("draw_win",     self._content_h)
+
+        dpg.set_item_height("plot_loss",    ph)
+        dpg.set_item_height("plot_acc",     ph)
+        for li in range(3):
+            dpg.set_item_height(f"plot_nodes_{li}", max(100, ph - 20))
+
+        dpg.set_item_width("plot_conf", self._draw_w - 24)
 
     # ── Theme ─────────────────────────────────────────────────────────────────
 
@@ -173,12 +210,12 @@ class App:
         dpg.create_viewport(
             title="MNIST Neural Network Visualizer",
             width=WIN_W, height=WIN_H,
-            resizable=False,
+            min_width=900, min_height=500,
             clear_color=(5, 5, 10, 255),
         )
         dpg.setup_dearpygui()
 
-        with dpg.window(tag="main_win", width=WIN_W, height=WIN_H,
+        with dpg.window(tag="main_win",
                         no_resize=True, no_move=True, no_title_bar=True,
                         no_scrollbar=True):
 
@@ -219,18 +256,18 @@ class App:
             with dpg.group(horizontal=True):
 
                 # ── Left: network graph ───────────────────────────────────────
-                with dpg.child_window(width=GRAPH_W, height=CONTENT_H,
+                with dpg.child_window(width=self._graph_w, height=self._content_h,
                                       tag="graph_win", border=True, no_scrollbar=True):
                     dpg.add_text("Network  (node = activation  |  edge = weight)",
                                  color=(120, 130, 190))
                     dpg.add_separator()
-                    with dpg.drawlist(width=GRAPH_W - 12,
-                                      height=CONTENT_H - 36,
+                    with dpg.drawlist(width=self._graph_w - 12,
+                                      height=self._content_h - 36,
                                       tag="graph_canvas"):
                         pass
 
                 # ── Centre: stats ─────────────────────────────────────────────
-                with dpg.child_window(width=STATS_W, height=CONTENT_H,
+                with dpg.child_window(width=self._stats_w, height=self._content_h,
                                       tag="stats_win", border=True):
 
                     with dpg.tab_bar():
@@ -327,7 +364,7 @@ class App:
                                         dpg.add_plot_legend()
 
                 # ── Right: draw & recognise ───────────────────────────────────
-                with dpg.child_window(width=DRAW_W, height=CONTENT_H,
+                with dpg.child_window(width=self._draw_w, height=self._content_h,
                                       tag="draw_win", border=True):
                     dpg.add_text("Draw a digit (0–9)", color=(120, 130, 190))
                     dpg.add_separator()
@@ -350,7 +387,7 @@ class App:
                     dpg.add_spacer(height=4)
 
                     # confidence bar chart
-                    with dpg.plot(height=160, width=DRAW_W - 24,
+                    with dpg.plot(height=160, width=self._draw_w - 24,
                                   tag="plot_conf", no_title=True,
                                   no_mouse_pos=True):
                         dpg.add_plot_axis(dpg.mvXAxis, tag="conf_x", no_gridlines=True)
@@ -617,8 +654,8 @@ class App:
     ) -> None:
         dpg.delete_item("graph_canvas", children_only=True)
 
-        canvas_w = GRAPH_W - 12
-        canvas_h = CONTENT_H - 36
+        canvas_w = self._graph_w - 12
+        canvas_h = self._content_h - 36
         y0 = 5
 
         positions = _compute_node_positions(_DRAW_SIZES, canvas_w, y0, canvas_h - y0 - 25)
@@ -696,6 +733,12 @@ class App:
         self._draw_network([], [])
 
         while dpg.is_dearpygui_running():
+            # handle viewport resize
+            vp_w = dpg.get_viewport_width()
+            vp_h = dpg.get_viewport_height()
+            if vp_w != self._vp_w or vp_h != self._vp_h:
+                self._resize(vp_w, vp_h)
+
             # handle mouse drawing
             self._handle_drawing()
             if self._draw_dirty:
