@@ -46,8 +46,8 @@ _DS_COLS       = 5
 _DS_ROWS       = 5
 _DS_N          = _DS_COLS * _DS_ROWS   # 25 images per page
 _IMG_SZ        = 56                    # display size per image (pixels)
-_METRICS       = ["Activation value", "Running avg (act)",
-                  "Rolling std (act)", "Weight mean", "Weight std"]
+_METRICS        = ["Activation value", "Running average", "Rolling std"]
+_WEIGHT_METRICS = ["Weight mean", "Weight std"]
 DRAW_GRID      = 28
 DRAW_CANVAS_SZ = DRAW_PX * DRAW_GRID   # 252
 
@@ -151,7 +151,8 @@ class App:
         self._node_weight_std_history: list[list[list[float]]] = [
             [[] for _ in range(_NODE_SHOWN[li])] for li in range(3)
         ]
-        self._node_metric: str = _METRICS[0]
+        self._node_metric:   str = _METRICS[0]
+        self._weight_metric: str = _WEIGHT_METRICS[0]
 
         # dataset browser
         self._dataset       = None   # loaded lazily
@@ -200,6 +201,7 @@ class App:
         dpg.set_item_height("plot_acc",     ph)
         for li in range(3):
             dpg.set_item_height(f"plot_nodes_{li}", max(100, ph - 20))
+            dpg.set_item_height(f"wplot_{li}",      max(100, ph - 20))
 
         dpg.set_item_width("plot_conf", self._draw_w - 24)
 
@@ -407,7 +409,60 @@ class App:
                                     if li == 2:
                                         dpg.add_plot_legend()
 
-                        # ── Tab 3: Dataset ────────────────────────────────────
+                        # ── Tab 3: Weights per node ───────────────────────────
+                        with dpg.tab(label="Weights"):
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Metric:", color=(160, 160, 200))
+                                dpg.add_combo(
+                                    _WEIGHT_METRICS,
+                                    default_value=_WEIGHT_METRICS[0],
+                                    tag="combo_weight_metric",
+                                    width=160,
+                                    callback=self._on_weight_metric_change,
+                                )
+                                dpg.add_text(
+                                    "  W[node, :] — incoming weights per node",
+                                    color=(100, 110, 150))
+                            dpg.add_separator()
+
+                            _wlayer_labels = [
+                                ("fc1  (128 nodes, 16 shown)", 180),
+                                ("fc2  (64 nodes, 16 shown)",  160),
+                                ("fc3 / Output  (10 nodes)",   160),
+                            ]
+                            for li, (lbl, ph) in enumerate(_wlayer_labels):
+                                dpg.add_text(lbl, color=(160, 170, 220))
+                                with dpg.plot(height=ph, width=-1,
+                                              tag=f"wplot_{li}",
+                                              no_title=True):
+                                    dpg.add_plot_axis(dpg.mvXAxis,
+                                                      label="batch",
+                                                      tag=f"wnode_x_{li}")
+                                    dpg.add_plot_axis(dpg.mvYAxis,
+                                                      label="weight",
+                                                      tag=f"wnode_y_{li}")
+                                    n    = _NODE_SHOWN[li]
+                                    step = _NODE_STEPS[li]
+                                    for ni in range(n):
+                                        node_idx = ni * step
+                                        col = _node_color(ni, n)
+                                        lbl_s = (f"out:{node_idx}"
+                                                 if li == 2
+                                                 else f"n{node_idx}")
+                                        dpg.add_line_series(
+                                            [], [],
+                                            label=lbl_s,
+                                            parent=f"wnode_y_{li}",
+                                            tag=f"wseries_{li}_{ni}",
+                                        )
+                                        dpg.bind_item_theme(
+                                            f"wseries_{li}_{ni}",
+                                            self._make_line_theme(col),
+                                        )
+                                    if li == 2:
+                                        dpg.add_plot_legend()
+
+                        # ── Tab 4: Dataset ───────────────────────────────────
                         with dpg.tab(label="Dataset"):
                             with dpg.group(horizontal=True):
                                 dpg.add_button(label="◀ Prev", width=70,
@@ -629,7 +684,6 @@ class App:
         self._refresh_node_series()
 
     def _refresh_node_series(self) -> None:
-        """Re-push all node series from the correct history array."""
         step_idx = len(self._node_act_history[0][0])
         if step_idx == 0:
             return
@@ -637,8 +691,6 @@ class App:
             _METRICS[0]: self._node_act_history,
             _METRICS[1]: self._node_avg_history,
             _METRICS[2]: self._node_std_history,
-            _METRICS[3]: self._node_weight_mean_history,
-            _METRICS[4]: self._node_weight_std_history,
         }
         src = hist_map.get(self._node_metric, self._node_act_history)
         for li in range(3):
@@ -648,6 +700,27 @@ class App:
                 dpg.set_value(f"node_series_{li}_{ni}", [xs, src[li][ni]])
             dpg.fit_axis_data(f"node_x_{li}")
             dpg.fit_axis_data(f"node_y_{li}")
+
+    def _on_weight_metric_change(self, sender, app_data) -> None:
+        self._weight_metric = app_data
+        self._refresh_weight_series()
+
+    def _refresh_weight_series(self) -> None:
+        step_idx = len(self._node_weight_mean_history[0][0])
+        if step_idx == 0:
+            return
+        w_hist_map = {
+            _WEIGHT_METRICS[0]: self._node_weight_mean_history,
+            _WEIGHT_METRICS[1]: self._node_weight_std_history,
+        }
+        src = w_hist_map.get(self._weight_metric, self._node_weight_mean_history)
+        for li in range(3):
+            hist_len = len(src[li][0])
+            xs = list(range(step_idx - hist_len, step_idx))
+            for ni in range(_NODE_SHOWN[li]):
+                dpg.set_value(f"wseries_{li}_{ni}", [xs, src[li][ni]])
+            dpg.fit_axis_data(f"wnode_x_{li}")
+            dpg.fit_axis_data(f"wnode_y_{li}")
 
     # ── Draw-pad callbacks ────────────────────────────────────────────────────
 
@@ -851,15 +924,13 @@ class App:
                 if len(ws_hist) > _HIST_LEN:
                     ws_hist.pop(0)
 
-        # push the currently selected metric to the chart
-        hist_map = {
+        # push activation metric to Node Activity tab
+        act_hist_map = {
             _METRICS[0]: self._node_act_history,
             _METRICS[1]: self._node_avg_history,
             _METRICS[2]: self._node_std_history,
-            _METRICS[3]: self._node_weight_mean_history,
-            _METRICS[4]: self._node_weight_std_history,
         }
-        src = hist_map.get(self._node_metric, self._node_act_history)
+        src = act_hist_map.get(self._node_metric, self._node_act_history)
         for li in range(len(stats.activations)):
             hist_len = len(src[li][0])
             xs_node  = list(range(step_idx - hist_len, step_idx))
@@ -867,6 +938,20 @@ class App:
                 dpg.set_value(f"node_series_{li}_{ni}", [xs_node, src[li][ni]])
             dpg.fit_axis_data(f"node_x_{li}")
             dpg.fit_axis_data(f"node_y_{li}")
+
+        # push weight metric to Weights tab
+        w_hist_map = {
+            _WEIGHT_METRICS[0]: self._node_weight_mean_history,
+            _WEIGHT_METRICS[1]: self._node_weight_std_history,
+        }
+        wsrc = w_hist_map.get(self._weight_metric, self._node_weight_mean_history)
+        for li in range(len(stats.weights)):
+            hist_len = len(wsrc[li][0])
+            xs_w     = list(range(step_idx - hist_len, step_idx))
+            for ni in range(_NODE_SHOWN[li]):
+                dpg.set_value(f"wseries_{li}_{ni}", [xs_w, wsrc[li][ni]])
+            dpg.fit_axis_data(f"wnode_x_{li}")
+            dpg.fit_axis_data(f"wnode_y_{li}")
 
         for i, ls in enumerate(stats.layer_stats):
             dead_col = (255, 90, 90) if ls.dead_neurons_pct > 20 else (170, 210, 170)
