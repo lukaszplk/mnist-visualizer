@@ -123,10 +123,11 @@ class MLP(nn.Module):
                 weights_mean=float(layer.weight.data.mean()),
                 weights_std=float(layer.weight.data.std()),
             )
-            # gradient stats (only available after backward)
-            if layer.weight.grad is not None:
-                s.grad_mean = float(layer.weight.grad.abs().mean())
-                s.grad_std = float(layer.weight.grad.std())
+            # gradient stats — capture ref first to avoid race with zero_grad()
+            grad = layer.weight.grad
+            if grad is not None:
+                s.grad_mean = float(grad.abs().mean())
+                s.grad_std  = float(grad.std())
 
             stats.append(s)
             act_arrays.append(neuron_means.numpy())

@@ -897,11 +897,12 @@ class App:
             return
         import numpy as _np
 
-        # heatmap — normalise each row so colours show relative confusion
+        # heatmap — row-normalise; flip so digit 0 is at bottom
         cm = self._cm.astype(_np.float32)
-        cm_norm = cm / (_np.maximum(cm.sum(axis=1, keepdims=True), 1))
-        # flip rows so digit 0 is at bottom (DPG heat_series origin = bottom-left)
-        cm_display = cm_norm[::-1, :].ravel().tolist()
+        cm_norm = cm / _np.maximum(cm.sum(axis=1, keepdims=True), 1)
+        cm_norm = _np.nan_to_num(cm_norm, nan=0.0)
+        # flip rows (DPG heat_series origin = bottom-left)
+        cm_display = [float(v) for v in _np.ascontiguousarray(cm_norm[::-1]).ravel()]
         dpg.set_value("series_cm", cm_display)
         dpg.configure_item("series_cm", scale_max=1.0)
 
