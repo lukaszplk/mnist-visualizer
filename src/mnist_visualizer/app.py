@@ -160,6 +160,13 @@ class App:
         self._ds_preds: list[int] = []
         self._ds_needs_refresh = False  # set by bg thread, consumed by main thread
 
+        # metrics / confusion matrix
+        self._cm: Optional[np.ndarray]      = None   # (10,10) int
+        self._class_metrics: Optional[dict] = None   # per-class stats
+        self._metrics_needs_refresh         = False
+        self._metrics_computing             = False
+        self._last_val_epoch                = -1
+
         # highlighted nodes/edges from last inference
         self._highlight_nodes:  list[set] = [set() for _ in range(4)]
         self._highlight_edges:  list[set] = [set() for _ in range(3)]
@@ -499,6 +506,73 @@ class App:
                                             )
                                         dpg.add_spacer(width=4)
 
+                        # ── Tab 5: Metrics ────────────────────────────────────
+                        with dpg.tab(label="Metrics"):
+                            with dpg.group(horizontal=True):
+                                dpg.add_button(label="Recompute",
+                                               tag="btn_recompute",
+                                               callback=self._on_recompute)
+                                dpg.add_spacer(width=10)
+                                dpg.add_text("", tag="txt_metrics_status",
+                                             color=(160, 200, 160))
+                            dpg.add_text("", tag="txt_overall_metrics",
+                                         color=(220, 200, 80))
+                            dpg.add_separator()
+
+                            dpg.add_text("Confusion matrix  (row=actual, col=predicted)",
+                                         color=(140, 150, 200))
+                            with dpg.plot(height=260, width=-1,
+                                          tag="plot_cm", no_title=True,
+                                          equal_aspects=True):
+                                cm_ax = dpg.add_plot_axis(
+                                    dpg.mvXAxis, label="Predicted",
+                                    tag="cm_x", no_gridlines=True)
+                                dpg.set_axis_limits("cm_x", -0.5, 9.5)
+                                dpg.set_axis_ticks("cm_x",
+                                    tuple((str(i), float(i)) for i in range(10)))
+                                cm_ay = dpg.add_plot_axis(
+                                    dpg.mvYAxis, label="Actual",
+                                    tag="cm_y", no_gridlines=True)
+                                dpg.set_axis_limits("cm_y", -0.5, 9.5)
+                                dpg.set_axis_ticks("cm_y",
+                                    tuple((str(i), float(i)) for i in range(10)))
+                                dpg.add_heat_series(
+                                    [0.0] * 100,
+                                    rows=10, cols=10,
+                                    scale_min=0, scale_max=1,
+                                    bounds_min=(-0.5, -0.5),
+                                    bounds_max=(9.5, 9.5),
+                                    parent="cm_y", tag="series_cm",
+                                    format=""
+                                )
+                                dpg.bind_colormap("plot_cm",
+                                                  dpg.mvPlotColormap_Hot)
+
+                            dpg.add_separator()
+                            dpg.add_text("Per-class metrics", color=(140, 150, 200))
+                            with dpg.table(tag="metrics_table", header_row=True,
+                                           borders_innerH=True, borders_outerH=True,
+                                           borders_innerV=True, borders_outerV=True,
+                                           row_background=True):
+                                for col in ["Class", "Precision", "Recall",
+                                            "F1", "Support"]:
+                                    dpg.add_table_column(label=col)
+                                for i in range(10):
+                                    with dpg.table_row(tag=f"mrow_{i}"):
+                                        dpg.add_text(str(i),  tag=f"mc_{i}_cls",
+                                                     color=(200, 200, 120))
+                                        dpg.add_text("—", tag=f"mc_{i}_prec")
+                                        dpg.add_text("—", tag=f"mc_{i}_rec")
+                                        dpg.add_text("—", tag=f"mc_{i}_f1")
+                                        dpg.add_text("—", tag=f"mc_{i}_sup")
+                                with dpg.table_row(tag="mrow_macro"):
+                                    dpg.add_text("macro", tag="mc_macro_cls",
+                                                 color=(180, 180, 255))
+                                    dpg.add_text("—", tag="mc_macro_prec")
+                                    dpg.add_text("—", tag="mc_macro_rec")
+                                    dpg.add_text("—", tag="mc_macro_f1")
+                                    dpg.add_text("—", tag="mc_macro_sup")
+
                 # ── Right: draw & recognise ───────────────────────────────────
                 with dpg.child_window(width=self._draw_w, height=self._content_h,
                                       tag="draw_win", border=True):
@@ -691,6 +765,109 @@ class App:
             pred, *_ = self._trainer.model.predict(img)
             self._ds_preds.append(pred)
         self._ds_needs_refresh = True
+
+    # ── Metrics / confusion matrix ────────────────────────────────────────────
+
+    def _on_recompute(self) -> None:
+        if self._trainer is None or self._trainer.model is None:
+            dpg.set_value("txt_metrics_status", "Train first!")
+            return
+        if self._metrics_computing:
+            return
+        dpg.set_value("txt_metrics_status", "Computing…")
+        threading.Thread(target=self._compute_metrics, daemon=True).start()
+
+    def _compute_metrics(self) -> None:
+        self._metrics_computing = True
+        try:
+            if not self._ensure_dataset() or self._dataset is None:
+                return
+            import numpy as _np
+            model = self._trainer.model
+            n     = len(self._dataset)
+            y_true, y_pred = [], []
+
+            for i in range(n):
+                img_tensor, label = self._dataset[i]
+                img  = img_tensor.squeeze().numpy()
+                pred, *_ = model.predict(img)
+                y_true.append(int(label))
+                y_pred.append(pred)
+
+            y_true = _np.array(y_true)
+            y_pred = _np.array(y_pred)
+
+            # confusion matrix (rows=actual, cols=predicted)
+            cm = _np.zeros((10, 10), dtype=_np.int32)
+            for t, p in zip(y_true, y_pred):
+                cm[t, p] += 1
+
+            # per-class precision / recall / F1
+            metrics = {}
+            for cls in range(10):
+                tp = int(cm[cls, cls])
+                fp = int(cm[:, cls].sum()) - tp
+                fn = int(cm[cls, :].sum()) - tp
+                tn = int(cm.sum()) - tp - fp - fn
+                prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                f1   = (2 * prec * rec / (prec + rec)
+                        if (prec + rec) > 0 else 0.0)
+                metrics[cls] = dict(precision=prec, recall=rec,
+                                    f1=f1, support=int(cm[cls].sum()))
+
+            self._cm           = cm
+            self._class_metrics = metrics
+            self._metrics_needs_refresh = True
+        finally:
+            self._metrics_computing = False
+
+    def _update_metrics_display(self) -> None:
+        if self._cm is None or self._class_metrics is None:
+            return
+        import numpy as _np
+
+        # heatmap — normalise each row so colours show relative confusion
+        cm = self._cm.astype(_np.float32)
+        cm_norm = cm / (_np.maximum(cm.sum(axis=1, keepdims=True), 1))
+        # flip rows so digit 0 is at bottom (DPG heat_series origin = bottom-left)
+        cm_display = cm_norm[::-1, :].ravel().tolist()
+        dpg.set_value("series_cm", cm_display)
+        dpg.configure_item("series_cm", scale_max=1.0)
+
+        # per-class table
+        precisions, recalls, f1s = [], [], []
+        for cls in range(10):
+            m = self._class_metrics[cls]
+            precisions.append(m["precision"])
+            recalls.append(m["recall"])
+            f1s.append(m["f1"])
+
+            # colour F1: red < 0.9, yellow < 0.97, green >= 0.97
+            f1v = m["f1"]
+            fc  = ((80, 220, 80) if f1v >= 0.97
+                   else (220, 200, 80) if f1v >= 0.90
+                   else (220, 80, 80))
+            dpg.set_value(f"mc_{cls}_prec", f"{m['precision']:.3f}")
+            dpg.set_value(f"mc_{cls}_rec",  f"{m['recall']:.3f}")
+            dpg.configure_item(f"mc_{cls}_f1", color=fc)
+            dpg.set_value(f"mc_{cls}_f1",   f"{m['f1']:.3f}")
+            dpg.set_value(f"mc_{cls}_sup",  str(m["support"]))
+
+        # macro averages
+        mp = float(_np.mean(precisions))
+        mr = float(_np.mean(recalls))
+        mf = float(_np.mean(f1s))
+        total = sum(m["support"] for m in self._class_metrics.values())
+        acc   = float(self._cm.trace()) / total * 100
+
+        dpg.set_value("mc_macro_prec", f"{mp:.3f}")
+        dpg.set_value("mc_macro_rec",  f"{mr:.3f}")
+        dpg.set_value("mc_macro_f1",   f"{mf:.3f}")
+        dpg.set_value("mc_macro_sup",  str(total))
+        dpg.set_value("txt_overall_metrics",
+            f"Accuracy: {acc:.2f}%   Macro F1: {mf:.4f}")
+        dpg.set_value("txt_metrics_status", "")
 
     # ── Node metric callback ──────────────────────────────────────────────────
 
@@ -980,6 +1157,15 @@ class App:
 
         self._draw_network(stats.activations, stats.weights)
 
+        # auto-recompute metrics at each epoch end
+        if (stats.epoch != self._last_val_epoch
+                and stats.batch == stats.total_batches
+                and not self._metrics_computing
+                and self._trainer.model is not None):
+            self._last_val_epoch = stats.epoch
+            dpg.set_value("txt_metrics_status", "Computing…")
+            threading.Thread(target=self._compute_metrics, daemon=True).start()
+
         # check if training finished
         if not self._trainer.is_running:
             self._on_stop()
@@ -1076,6 +1262,11 @@ class App:
         threading.Thread(target=self._ensure_dataset, daemon=True).start()
 
         while dpg.is_dearpygui_running():
+            # metrics refresh (must happen on main thread)
+            if self._metrics_needs_refresh:
+                self._metrics_needs_refresh = False
+                self._update_metrics_display()
+
             # dataset texture refresh (must happen on main thread)
             if self._ds_needs_refresh:
                 self._ds_needs_refresh = False
