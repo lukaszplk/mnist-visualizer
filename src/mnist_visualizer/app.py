@@ -12,6 +12,7 @@ Controls in the top bar: Start · Pause · Stop · Epochs · Batch · LR
 
 from __future__ import annotations
 
+import colorsys
 import math
 import threading
 from dataclasses import dataclass
@@ -33,6 +34,11 @@ CONTENT_H      = WIN_H - 90
 
 NODE_R         = 7
 DRAW_PX        = 9          # screen pixels per MNIST pixel
+
+# node-activity chart: how many nodes to show per layer and history length
+_NODE_SHOWN    = [16, 16, 10]     # fc1, fc2, fc3
+_NODE_STEPS    = [8,   4,  1]     # sampling stride (128/16, 64/16, 10/10)
+_HIST_LEN      = 300              # batches kept in rolling window
 DRAW_GRID      = 28
 DRAW_CANVAS_SZ = DRAW_PX * DRAW_GRID   # 252
 
@@ -56,6 +62,13 @@ def _activation_color(value: float, highlight: bool = False) -> tuple:
         return (int(30 + t*200), int(100 + t*120), int(220 - t*20), 220)
     t = (v - 0.5) * 2
     return (int(230 + t*25), int(220 - t*180), int(200 - t*170), 220)
+
+
+def _node_color(node_idx: int, n_nodes: int, alpha: int = 220) -> tuple:
+    """Evenly spaced hue wheel colour for a node line."""
+    h = node_idx / max(n_nodes, 1)
+    r, g, b = colorsys.hsv_to_rgb(h, 0.75, 0.95)
+    return (int(r * 255), int(g * 255), int(b * 255), alpha)
 
 
 def _weight_color(value: float, highlight: bool = False) -> tuple:
@@ -105,10 +118,25 @@ class App:
         self._draw_dirty = False
         self._infer_result: Optional[tuple] = None   # (pred, probs, acts, weights)
 
+        # per-node activation history: [layer][node] → list of floats
+        self._node_act_history: list[list[list[float]]] = [
+            [[] for _ in range(_NODE_SHOWN[li])] for li in range(3)
+        ]
+
         # highlighted nodes/edges from last inference
         self._highlight_nodes:  list[set] = [set() for _ in range(4)]
         self._highlight_edges:  list[set] = [set() for _ in range(3)]
         self._inference_active  = False
+
+    # ── Per-series colour theme ───────────────────────────────────────────────
+
+    @staticmethod
+    def _make_line_theme(color: tuple) -> int:
+        with dpg.theme() as t:
+            with dpg.theme_component(dpg.mvLineSeries):
+                dpg.add_theme_color(dpg.mvPlotCol_Line, color,
+                                    category=dpg.mvThemeCat_Plots)
+        return t
 
     # ── Theme ─────────────────────────────────────────────────────────────────
 
@@ -204,48 +232,99 @@ class App:
                 # ── Centre: stats ─────────────────────────────────────────────
                 with dpg.child_window(width=STATS_W, height=CONTENT_H,
                                       tag="stats_win", border=True):
-                    dpg.add_text("Training Statistics", color=(120, 130, 190))
-                    dpg.add_text("Epoch: —   Batch: —   Loss: —   Acc: —",
-                                 tag="txt_counters", color=(220, 200, 80))
-                    dpg.add_text("Val accuracy: —",
-                                 tag="txt_val", color=(80, 200, 160))
-                    dpg.add_separator()
 
-                    dpg.add_text("Loss", color=(200, 140, 80))
-                    with dpg.plot(height=PLOT_H, width=-1, tag="plot_loss", no_title=True):
-                        dpg.add_plot_axis(dpg.mvXAxis, label="step", tag="loss_x")
-                        dpg.add_plot_axis(dpg.mvYAxis, label="loss", tag="loss_y")
-                        dpg.add_line_series([], [], label="loss",
-                                            parent="loss_y", tag="series_loss")
+                    with dpg.tab_bar():
 
-                    dpg.add_text("Accuracy (%)", color=(80, 180, 140))
-                    with dpg.plot(height=PLOT_H, width=-1, tag="plot_acc", no_title=True):
-                        dpg.add_plot_axis(dpg.mvXAxis, label="step", tag="acc_x")
-                        dpg.add_plot_axis(dpg.mvYAxis, label="%",    tag="acc_y")
-                        dpg.add_line_series([], [], label="batch",
-                                            parent="acc_y", tag="series_batch_acc")
-                        dpg.add_line_series([], [], label="epoch",
-                                            parent="acc_y", tag="series_epoch_acc")
-                        dpg.add_line_series([], [], label="val",
-                                            parent="acc_y", tag="series_val_acc")
-                        dpg.add_plot_legend()
+                        # ── Tab 1: Overview ───────────────────────────────────
+                        with dpg.tab(label="Overview"):
+                            dpg.add_text("Epoch: —   Batch: —   Loss: —   Acc: —",
+                                         tag="txt_counters", color=(220, 200, 80))
+                            dpg.add_text("Val accuracy: —",
+                                         tag="txt_val", color=(80, 200, 160))
+                            dpg.add_separator()
 
-                    dpg.add_separator()
-                    dpg.add_text("Per-layer stats", color=(120, 170, 210))
-                    with dpg.table(tag="layer_table", header_row=True,
-                                   borders_innerH=True, borders_outerH=True,
-                                   borders_innerV=True, borders_outerV=True,
-                                   row_background=True):
-                        for col in ["Layer", "Act μ", "Act σ", "Dead %", "W μ", "∇W μ"]:
-                            dpg.add_table_column(label=col)
-                        for i, name in enumerate(["fc1 →128", "fc2 →64", "fc3 →10"]):
-                            with dpg.table_row(tag=f"row_{i}"):
-                                dpg.add_text(name,  tag=f"c{i}_name")
-                                dpg.add_text("—",   tag=f"c{i}_am")
-                                dpg.add_text("—",   tag=f"c{i}_as")
-                                dpg.add_text("—",   tag=f"c{i}_dead")
-                                dpg.add_text("—",   tag=f"c{i}_wm")
-                                dpg.add_text("—",   tag=f"c{i}_gm")
+                            dpg.add_text("Loss", color=(200, 140, 80))
+                            with dpg.plot(height=PLOT_H, width=-1, tag="plot_loss",
+                                          no_title=True):
+                                dpg.add_plot_axis(dpg.mvXAxis, label="step", tag="loss_x")
+                                dpg.add_plot_axis(dpg.mvYAxis, label="loss", tag="loss_y")
+                                dpg.add_line_series([], [], label="loss",
+                                                    parent="loss_y", tag="series_loss")
+
+                            dpg.add_text("Accuracy (%)", color=(80, 180, 140))
+                            with dpg.plot(height=PLOT_H, width=-1, tag="plot_acc",
+                                          no_title=True):
+                                dpg.add_plot_axis(dpg.mvXAxis, label="step", tag="acc_x")
+                                dpg.add_plot_axis(dpg.mvYAxis, label="%",    tag="acc_y")
+                                dpg.add_line_series([], [], label="batch",
+                                                    parent="acc_y", tag="series_batch_acc")
+                                dpg.add_line_series([], [], label="epoch",
+                                                    parent="acc_y", tag="series_epoch_acc")
+                                dpg.add_line_series([], [], label="val",
+                                                    parent="acc_y", tag="series_val_acc")
+                                dpg.add_plot_legend()
+
+                            dpg.add_separator()
+                            dpg.add_text("Per-layer stats", color=(120, 170, 210))
+                            with dpg.table(tag="layer_table", header_row=True,
+                                           borders_innerH=True, borders_outerH=True,
+                                           borders_innerV=True, borders_outerV=True,
+                                           row_background=True):
+                                for col in ["Layer", "Act μ", "Act σ", "Dead %", "W μ", "∇W μ"]:
+                                    dpg.add_table_column(label=col)
+                                for i, name in enumerate(["fc1 →128", "fc2 →64", "fc3 →10"]):
+                                    with dpg.table_row(tag=f"row_{i}"):
+                                        dpg.add_text(name, tag=f"c{i}_name")
+                                        dpg.add_text("—",  tag=f"c{i}_am")
+                                        dpg.add_text("—",  tag=f"c{i}_as")
+                                        dpg.add_text("—",  tag=f"c{i}_dead")
+                                        dpg.add_text("—",  tag=f"c{i}_wm")
+                                        dpg.add_text("—",  tag=f"c{i}_gm")
+
+                        # ── Tab 2: Node Activity ──────────────────────────────
+                        with dpg.tab(label="Node Activity"):
+                            dpg.add_text(
+                                "Activation per node over batches  "
+                                "(sampled: 16 / 16 / 10 nodes)",
+                                color=(140, 150, 200))
+                            dpg.add_separator()
+
+                            _layer_labels = [
+                                ("fc1  (128 nodes, 16 shown)", 180),
+                                ("fc2  (64 nodes, 16 shown)",  160),
+                                ("fc3 / Output  (10 nodes)",   160),
+                            ]
+                            for li, (lbl, ph) in enumerate(_layer_labels):
+                                dpg.add_text(lbl, color=(160, 170, 220))
+                                with dpg.plot(height=ph, width=-1,
+                                              tag=f"plot_nodes_{li}",
+                                              no_title=True):
+                                    dpg.add_plot_axis(dpg.mvXAxis,
+                                                      label="batch",
+                                                      tag=f"node_x_{li}")
+                                    dpg.add_plot_axis(dpg.mvYAxis,
+                                                      label="activation",
+                                                      tag=f"node_y_{li}")
+                                    n = _NODE_SHOWN[li]
+                                    step = _NODE_STEPS[li]
+                                    for ni in range(n):
+                                        node_idx = ni * step
+                                        col = _node_color(ni, n)
+                                        lbl_s = (f"out:{node_idx}"
+                                                 if li == 2
+                                                 else f"n{node_idx}")
+                                        dpg.add_line_series(
+                                            [], [],
+                                            label=lbl_s,
+                                            parent=f"node_y_{li}",
+                                            tag=f"node_series_{li}_{ni}",
+                                        )
+                                        dpg.bind_item_theme(
+                                            f"node_series_{li}_{ni}",
+                                            self._make_line_theme(col),
+                                        )
+                                    if li == 2:
+                                        dpg.add_plot_legend()
 
                 # ── Right: draw & recognise ───────────────────────────────────
                 with dpg.child_window(width=DRAW_W, height=CONTENT_H,
@@ -490,6 +569,27 @@ class App:
         dpg.set_value("series_val_acc",   [xs, self._val_acc_history])
         dpg.fit_axis_data("loss_x"); dpg.fit_axis_data("loss_y")
         dpg.fit_axis_data("acc_x");  dpg.fit_axis_data("acc_y")
+
+        # ── node activity history ─────────────────────────────────────────────
+        step_idx = len(self._loss_history)
+        for li, acts in enumerate(stats.activations):
+            n = _NODE_SHOWN[li]
+            stride = _NODE_STEPS[li]
+            for ni in range(n):
+                node_real_idx = min(ni * stride, len(acts) - 1)
+                val = float(acts[node_real_idx])
+                hist = self._node_act_history[li][ni]
+                hist.append(val)
+                if len(hist) > _HIST_LEN:
+                    hist.pop(0)
+            # update all series for this layer at once
+            hist_len = len(self._node_act_history[li][0])
+            xs_node  = list(range(step_idx - hist_len, step_idx))
+            for ni in range(n):
+                dpg.set_value(f"node_series_{li}_{ni}",
+                              [xs_node, self._node_act_history[li][ni]])
+            dpg.fit_axis_data(f"node_x_{li}")
+            dpg.fit_axis_data(f"node_y_{li}")
 
         for i, ls in enumerate(stats.layer_stats):
             dead_col = (255, 90, 90) if ls.dead_neurons_pct > 20 else (170, 210, 170)
