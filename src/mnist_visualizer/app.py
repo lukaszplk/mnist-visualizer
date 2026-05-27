@@ -163,6 +163,7 @@ class App:
         self._ds_offset        = 0
         self._ds_preds: list[int] = []
         self._ds_needs_refresh = False  # set by bg thread, consumed by main thread
+        self._ds_error: str = ""
 
         # metrics / confusion matrix
         self._cm: Optional[np.ndarray]      = None   # (10,10) int
@@ -520,28 +521,32 @@ class App:
                                                tag="btn_ds_predict",
                                                callback=self._on_ds_predict)
                                 dpg.add_spacer(width=8)
-                                dpg.add_text("", tag="txt_ds_page",
+                                dpg.add_text("Loading…", tag="txt_ds_page",
                                              color=(160, 160, 200))
                             dpg.add_separator()
 
-                            # 5×5 image grid
-                            for row in range(_DS_ROWS):
-                                with dpg.group(horizontal=True):
-                                    for col in range(_DS_COLS):
-                                        idx = row * _DS_COLS + col
-                                        with dpg.group():
-                                            dpg.add_image(
-                                                f"tex_ds_{idx}",
-                                                width=_IMG_SZ,
-                                                height=_IMG_SZ,
-                                                tag=f"img_ds_{idx}",
-                                            )
-                                            dpg.add_text(
-                                                "—",
-                                                tag=f"lbl_ds_{idx}",
-                                                color=(200, 200, 160),
-                                            )
-                                        dpg.add_spacer(width=4)
+                            # scrollable child so tab bar header stays fixed
+                            with dpg.child_window(tag="ds_scroll",
+                                                  width=-1, height=-1,
+                                                  border=False):
+                                # 5×5 image grid
+                                for row in range(_DS_ROWS):
+                                    with dpg.group(horizontal=True):
+                                        for col in range(_DS_COLS):
+                                            idx = row * _DS_COLS + col
+                                            with dpg.group():
+                                                dpg.add_image(
+                                                    f"tex_ds_{idx}",
+                                                    width=_IMG_SZ,
+                                                    height=_IMG_SZ,
+                                                    tag=f"img_ds_{idx}",
+                                                )
+                                                dpg.add_text(
+                                                    "—",
+                                                    tag=f"lbl_ds_{idx}",
+                                                    color=(200, 200, 160),
+                                                )
+                                            dpg.add_spacer(width=4)
 
                         # ── Tab 5: Metrics ────────────────────────────────────
                         with dpg.tab(label="Metrics"):
@@ -711,27 +716,60 @@ class App:
                 Path.home() / ".cache" / "mnist_visualizer",
                 train=False, download=True, transform=t,
             )
-            # signal main thread to refresh textures (dpg calls must be on main thread)
             self._ds_needs_refresh = True
             return True
-        except Exception:
+        except Exception as exc:
+            # surface the error on the Dataset tab's status text
+            self._ds_error = str(exc)
+            self._ds_needs_refresh = True
             return False
+
+    @staticmethod
+    def _mnist_to_texture(img: "np.ndarray") -> list:
+        """Convert a (28,28) float32 MNIST image to a flat RGBA float list at _IMG_SZ."""
+        import numpy as _np
+        try:
+            from PIL import Image as _PILImage
+            pil = _PILImage.fromarray((_np.clip(img, 0, 1) * 255).astype(_np.uint8), mode="L")
+            pil = pil.resize((_IMG_SZ, _IMG_SZ), _PILImage.LANCZOS)
+            arr = _np.asarray(pil).astype(_np.float32) / 255.0
+        except ImportError:
+            # fallback: nearest-neighbour via repeat
+            factor = _IMG_SZ / 28
+            arr = _np.repeat(_np.repeat(img, int(factor), axis=0),
+                             int(factor), axis=1).astype(_np.float32)
+            arr = arr[:_IMG_SZ, :_IMG_SZ]
+            if arr.shape[0] < _IMG_SZ or arr.shape[1] < _IMG_SZ:
+                pad = _np.zeros((_IMG_SZ, _IMG_SZ), dtype=_np.float32)
+                pad[:arr.shape[0], :arr.shape[1]] = arr
+                arr = pad
+
+        # gamma for visibility
+        arr = _np.clip(arr ** 0.5, 0.0, 1.0)
+        # tint: white digit on near-black background (slight blue tint)
+        r = arr
+        g = arr
+        b = _np.clip(arr + 0.08, 0, 1)
+        a = _np.ones((_IMG_SZ, _IMG_SZ), dtype=_np.float32)
+        return _np.stack([r, g, b, a], axis=-1).ravel().tolist()
 
     def _update_dataset_display(self) -> None:
         """Must be called from the main (render) thread."""
         if self._dataset is None:
+            if self._ds_error:
+                dpg.set_value("txt_ds_page",
+                              f"Error loading dataset: {self._ds_error}")
             return
-        import numpy as _np
         n = len(self._dataset)
         dpg.set_value("txt_ds_page",
             f"Images {self._ds_offset}–{min(self._ds_offset + _DS_N, n) - 1}  of {n}")
 
-        scale = _IMG_SZ // 28   # 64//28 = 2 (pad remaining with bilinear-ish)
+        import numpy as _np
+        blank = [0.08, 0.08, 0.14, 1.0] * (_IMG_SZ * _IMG_SZ)
 
         for i in range(_DS_N):
             ds_idx = self._ds_offset + i
             if ds_idx >= n:
-                blank = [0.08, 0.08, 0.12, 1.0] * (_IMG_SZ * _IMG_SZ)
                 dpg.set_value(f"tex_ds_{i}", blank)
                 dpg.set_value(f"lbl_ds_{i}", "—")
                 continue
@@ -739,25 +777,7 @@ class App:
             img_tensor, label = self._dataset[ds_idx]
             img = img_tensor.squeeze().numpy()   # (28, 28) float32 [0,1]
 
-            # upscale to _IMG_SZ with nearest-neighbour then boost contrast
-            img_up = _np.kron(img, _np.ones((scale, scale), dtype=_np.float32))
-            # crop or pad to exact _IMG_SZ
-            img_up = img_up[:_IMG_SZ, :_IMG_SZ]
-            if img_up.shape[0] < _IMG_SZ or img_up.shape[1] < _IMG_SZ:
-                pad = _np.zeros((_IMG_SZ, _IMG_SZ), dtype=_np.float32)
-                pad[:img_up.shape[0], :img_up.shape[1]] = img_up
-                img_up = pad
-
-            # gamma boost for visibility  (γ = 0.6 brightens mid-tones)
-            img_up = _np.clip(img_up ** 0.6, 0, 1)
-
-            # colour: white digit on dark blue background
-            r = img_up
-            g = img_up
-            b = _np.clip(img_up * 1.2, 0, 1)
-            a = _np.ones_like(img_up)
-            rgba_arr = _np.stack([r, g, b, a], axis=-1).ravel().astype(_np.float32)
-            dpg.set_value(f"tex_ds_{i}", rgba_arr.tolist())
+            dpg.set_value(f"tex_ds_{i}", self._mnist_to_texture(img))
 
             # label / prediction text
             if i < len(self._ds_preds):
