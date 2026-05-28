@@ -811,13 +811,13 @@ class App:
         if kind == "node":
             self._node_filter[li] = indices
             for ni in range(n):
-                dpg.configure_item(f"node_series_{li}_{ni}",
-                                   show=(ni in indices))
+                tag = f"node_series_{li}_{ni}"
+                dpg.show_item(tag) if ni in indices else dpg.hide_item(tag)
         else:
             self._weight_filter[li] = indices
             for ni in range(n):
-                dpg.configure_item(f"wseries_{li}_{ni}",
-                                   show=(ni in indices))
+                tag = f"wseries_{li}_{ni}"
+                dpg.show_item(tag) if ni in indices else dpg.hide_item(tag)
 
     def _clear_filter(self, li: int, kind: str) -> None:
         n = _NODE_SHOWN[li]
@@ -825,12 +825,12 @@ class App:
             self._node_filter[li] = None
             dpg.set_value(f"inp_node_filter_{li}", "")
             for ni in range(n):
-                dpg.configure_item(f"node_series_{li}_{ni}", show=True)
+                dpg.show_item(f"node_series_{li}_{ni}")
         else:
             self._weight_filter[li] = None
             dpg.set_value(f"inp_weight_filter_{li}", "")
             for ni in range(n):
-                dpg.configure_item(f"wseries_{li}_{ni}", show=True)
+                dpg.show_item(f"wseries_{li}_{ni}")
 
     # ── Metrics / confusion matrix ────────────────────────────────────────────
 
