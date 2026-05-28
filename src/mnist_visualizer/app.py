@@ -260,12 +260,7 @@ class App:
         )
         dpg.setup_dearpygui()
 
-        # texture registry — single slot for the dataset viewer
-        with dpg.texture_registry(tag="tex_registry"):
-            placeholder = [0.12, 0.12, 0.18, 1.0] * (_IMG_SZ * _IMG_SZ)
-            dpg.add_raw_texture(_IMG_SZ, _IMG_SZ, placeholder,
-                                tag="tex_ds_0",
-                                format=dpg.mvFormat_Float_rgba)
+        # (no texture registry needed — dataset image drawn via drawlist)
 
         with dpg.window(tag="main_win",
                         no_resize=True, no_move=True, no_title_bar=True,
@@ -522,10 +517,10 @@ class App:
                                              color=(160, 160, 200))
                             dpg.add_separator()
 
-                            # single large image
-                            dpg.add_image("tex_ds_0",
-                                          width=_IMG_SZ, height=_IMG_SZ,
-                                          tag="img_ds_0")
+                            # digit drawn as pixel rectangles (no texture needed)
+                            with dpg.drawlist(width=_IMG_SZ, height=_IMG_SZ,
+                                              tag="ds_drawlist"):
+                                pass
                             dpg.add_spacer(height=6)
                             dpg.add_text("—", tag="lbl_ds_0",
                                          color=(200, 200, 160))
@@ -708,40 +703,25 @@ class App:
             self._ds_needs_refresh = True
             return False
 
-    @staticmethod
-    def _mnist_to_texture(img: "np.ndarray") -> list:
-        """Convert a (28,28) float32 MNIST image to a flat RGBA float list at _IMG_SZ."""
+    def _draw_mnist_image(self, img: "np.ndarray") -> None:
+        """Render a (28,28) float32 image into the ds_drawlist via pixel rectangles."""
+        dpg.delete_item("ds_drawlist", children_only=True)
+        px = _IMG_SZ / 28          # 252/28 = 9.0 screen pixels per MNIST pixel
         import numpy as _np
-        try:
-            from PIL import Image as _PILImage, ImageFilter as _IFilter
-            # 1. upscale with bicubic for smooth edges
-            pil = _PILImage.fromarray((_np.clip(img, 0, 1) * 255).astype(_np.uint8), mode="L")
-            pil = pil.resize((_IMG_SZ, _IMG_SZ), _PILImage.BICUBIC)
-            # mild smooth to soften any residual block artefacts
-            pil = pil.filter(_IFilter.SMOOTH_MORE)
-            arr = _np.asarray(pil).astype(_np.float32) / 255.0
-        except ImportError:
-            # fallback: bilinear via scipy if available, else nearest-neighbour
-            try:
-                from scipy.ndimage import zoom as _zoom
-                arr = _zoom(img.astype(_np.float32),
-                            _IMG_SZ / 28, order=1)[:_IMG_SZ, :_IMG_SZ]
-            except ImportError:
-                arr = _np.repeat(_np.repeat(img, _IMG_SZ // 28, axis=0),
-                                 _IMG_SZ // 28, axis=1).astype(_np.float32)
-            arr = arr[:_IMG_SZ, :_IMG_SZ]
-            pad = _np.zeros((_IMG_SZ, _IMG_SZ), dtype=_np.float32)
-            pad[:arr.shape[0], :arr.shape[1]] = arr
-            arr = pad
-
-        # gamma lift so mid-grey strokes become clearly visible
-        arr = _np.clip(arr ** 0.55, 0.0, 1.0)
-        # slight blue tint on the bright pixels
-        r = arr
-        g = arr
-        b = _np.clip(arr + 0.10, 0.0, 1.0)
-        a = _np.ones((_IMG_SZ, _IMG_SZ), dtype=_np.float32)
-        return _np.stack([r, g, b, a], axis=-1).ravel().tolist()
+        img_g = _np.clip(img ** 0.5, 0.0, 1.0)   # gamma lift
+        for row in range(28):
+            for col in range(28):
+                v = float(img_g[row, col])
+                if v < 0.02:       # skip near-black pixels for speed
+                    continue
+                vi = int(v * 255)
+                color = (vi, vi, min(vi + 25, 255), 255)
+                x0, y0 = col * px, row * px
+                dpg.draw_rectangle(
+                    (x0, y0), (x0 + px, y0 + px),
+                    color=color, fill=color,
+                    parent="ds_drawlist", thickness=0,
+                )
 
     def _update_dataset_display(self) -> None:
         """Must be called from the main (render) thread."""
@@ -758,7 +738,7 @@ class App:
         img_tensor, label = self._dataset[idx]
         img = img_tensor.squeeze().numpy()   # (28,28) float32 [0,1]
 
-        dpg.set_value("tex_ds_0", self._mnist_to_texture(img))
+        self._draw_mnist_image(img)
         dpg.set_value("lbl_ds_0", f"Label: {label}")
 
         if self._ds_preds:
