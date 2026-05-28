@@ -45,12 +45,12 @@ _ROLLING_N     = 20               # window for rolling avg / std
 # dataset browser
 _IMG_SZ        = 252                   # 9 × 28 — fills ~half the stats panel width
 
-# activations tab cell sizes
-_ACT_INPUT_PX  = 7     # px per MNIST pixel in input grid  (28×28 → 196×196)
-_ACT_H1_PX     = 20    # px per neuron in hidden-1 grid    (16×8  → 320×160)
-_ACT_H2_PX     = 26    # px per neuron in hidden-2 grid    (8×8   → 208×208)
-_ACT_BAR_W     = 340   # width of output probability bars
-_ACT_BAR_H     = 28    # height per class bar
+# activations panel cell sizes (right panel, always visible)
+_ACT_INPUT_PX  = 6     # px per MNIST pixel  (28×28 → 168×168)
+_ACT_H1_PX     = 17    # px per neuron h1    (16×8  → 272×136)
+_ACT_H2_PX     = 20    # px per neuron h2    (8×8   → 160×160)
+_ACT_BAR_W     = 300   # width of output bars
+_ACT_BAR_H     = 25    # height per class bar
 _METRICS        = ["Activation value", "Running average", "Rolling std"]
 _WEIGHT_METRICS = ["Weight mean", "Weight std"]
 DRAW_GRID      = 28
@@ -230,7 +230,7 @@ class App:
             dpg.set_item_height(f"plot_nodes_{li}", max(100, ph - 20))
             dpg.set_item_height(f"wplot_{li}",      max(100, ph - 20))
 
-        dpg.set_item_width("plot_conf", self._draw_w - 24)
+        # plot_conf is inside the stats tab (width=-1 auto-sizes)
 
     # ── Theme ─────────────────────────────────────────────────────────────────
 
@@ -309,6 +309,14 @@ class App:
                 dpg.add_spacer(width=20)
                 dpg.add_text("", tag="txt_status", color=(100, 220, 140))
 
+            # always-visible training progress line
+            with dpg.group(horizontal=True):
+                dpg.add_text("Epoch: —   Batch: —   Loss: —   Acc: —",
+                             tag="txt_counters", color=(220, 200, 80))
+                dpg.add_spacer(width=20)
+                dpg.add_text("Val accuracy: —",
+                             tag="txt_val", color=(80, 200, 160))
+
             dpg.add_separator()
 
             # ── Three-panel row ───────────────────────────────────────────────
@@ -331,12 +339,39 @@ class App:
 
                     with dpg.tab_bar():
 
-                        # ── Tab 1: Overview ───────────────────────────────────
+                        # ── Tab 1: Draw & Recognise ───────────────────────────
+                        with dpg.tab(label="Draw"):
+                            with dpg.drawlist(width=DRAW_CANVAS_SZ,
+                                              height=DRAW_CANVAS_SZ,
+                                              tag="draw_canvas"):
+                                pass
+                            dpg.add_spacer(height=6)
+                            with dpg.group(horizontal=True):
+                                dpg.add_button(label="Clear", width=100,
+                                               callback=self._on_clear_draw)
+                                dpg.add_button(label="Recognise", width=110,
+                                               callback=self._on_recognise,
+                                               tag="btn_recognise")
+                            dpg.add_spacer(height=8)
+                            dpg.add_text("", tag="txt_pred", color=(255, 220, 80))
+                            dpg.add_spacer(height=4)
+                            with dpg.plot(height=160, width=-1,
+                                          tag="plot_conf", no_title=True,
+                                          no_mouse_pos=True):
+                                dpg.add_plot_axis(dpg.mvXAxis, tag="conf_x",
+                                                  no_gridlines=True)
+                                dpg.set_axis_ticks("conf_x",
+                                    tuple((str(i), float(i)) for i in range(10)))
+                                dpg.add_plot_axis(dpg.mvYAxis, tag="conf_y",
+                                                  label="%", no_gridlines=True)
+                                dpg.set_axis_limits("conf_y", 0, 100)
+                                dpg.add_bar_series(list(range(10)), [0]*10,
+                                                   weight=0.6,
+                                                   parent="conf_y",
+                                                   tag="series_conf")
+
+                        # ── Tab 2: Overview ───────────────────────────────────
                         with dpg.tab(label="Overview"):
-                            dpg.add_text("Epoch: —   Batch: —   Loss: —   Acc: —",
-                                         tag="txt_counters", color=(220, 200, 80))
-                            dpg.add_text("Val accuracy: —",
-                                         tag="txt_val", color=(80, 200, 160))
                             dpg.add_separator()
 
                             dpg.add_text("Loss", color=(200, 140, 80))
@@ -610,89 +645,43 @@ class App:
                                     dpg.add_text("—", tag="mc_macro_f1")
                                     dpg.add_text("—", tag="mc_macro_sup")
 
-                        # ── Tab 6: Activations ───────────────────────────────
-                        with dpg.tab(label="Activations"):
-                            dpg.add_text("", tag="txt_act_status",
-                                         color=(160, 160, 200))
-                            dpg.add_separator()
-                            with dpg.child_window(tag="act_scroll",
-                                                  width=-1, height=-1,
-                                                  border=False):
-                                # Input layer ─ 28×28 grid
-                                dpg.add_text("Input  (784 pixels)",
-                                             color=(140, 170, 220))
-                                with dpg.drawlist(
-                                        width=28 * _ACT_INPUT_PX,
-                                        height=28 * _ACT_INPUT_PX,
-                                        tag="act_draw_input"):
-                                    pass
-                                dpg.add_spacer(height=8)
-
-                                # Hidden 1 ─ 128 neurons as 16×8 grid
-                                dpg.add_text("Hidden 1  (128 neurons)",
-                                             color=(140, 170, 220))
-                                with dpg.drawlist(
-                                        width=16 * _ACT_H1_PX,
-                                        height=8  * _ACT_H1_PX,
-                                        tag="act_draw_h1"):
-                                    pass
-                                dpg.add_spacer(height=8)
-
-                                # Hidden 2 ─ 64 neurons as 8×8 grid
-                                dpg.add_text("Hidden 2  (64 neurons)",
-                                             color=(140, 170, 220))
-                                with dpg.drawlist(
-                                        width=8 * _ACT_H2_PX,
-                                        height=8 * _ACT_H2_PX,
-                                        tag="act_draw_h2"):
-                                    pass
-                                dpg.add_spacer(height=8)
-
-                                # Output ─ 10 probability bars
-                                dpg.add_text("Output  (10 classes)",
-                                             color=(140, 170, 220))
-                                with dpg.drawlist(
-                                        width=_ACT_BAR_W,
-                                        height=10 * _ACT_BAR_H,
-                                        tag="act_draw_out"):
-                                    pass
-
-                # ── Right: draw & recognise ───────────────────────────────────
+                # ── Right: activations (always visible) ───────────────────────
                 with dpg.child_window(width=self._draw_w, height=self._content_h,
                                       tag="draw_win", border=True):
-                    dpg.add_text("Draw a digit (0–9)", color=(120, 130, 190))
+                    dpg.add_text("Activations", color=(120, 130, 190))
+                    dpg.add_text("", tag="txt_act_status", color=(160, 160, 200))
                     dpg.add_separator()
 
-                    # drawing canvas
-                    with dpg.drawlist(width=DRAW_CANVAS_SZ, height=DRAW_CANVAS_SZ,
-                                      tag="draw_canvas"):
+                    # Input layer ─ 28×28 grid
+                    dpg.add_text("Input  (784 pixels)", color=(140, 170, 220))
+                    with dpg.drawlist(width=28 * _ACT_INPUT_PX,
+                                      height=28 * _ACT_INPUT_PX,
+                                      tag="act_draw_input"):
                         pass
-
                     dpg.add_spacer(height=6)
-                    with dpg.group(horizontal=True):
-                        dpg.add_button(label="Clear",     width=100,
-                                       callback=self._on_clear_draw)
-                        dpg.add_button(label="Recognise", width=110,
-                                       callback=self._on_recognise,
-                                       tag="btn_recognise")
 
-                    dpg.add_spacer(height=8)
-                    dpg.add_text("", tag="txt_pred",  color=(255, 220, 80))
-                    dpg.add_spacer(height=4)
+                    # Hidden 1 ─ 128 neurons as 16×8 grid
+                    dpg.add_text("Hidden 1  (128 neurons)", color=(140, 170, 220))
+                    with dpg.drawlist(width=16 * _ACT_H1_PX,
+                                      height=8  * _ACT_H1_PX,
+                                      tag="act_draw_h1"):
+                        pass
+                    dpg.add_spacer(height=6)
 
-                    # confidence bar chart
-                    with dpg.plot(height=160, width=self._draw_w - 24,
-                                  tag="plot_conf", no_title=True,
-                                  no_mouse_pos=True):
-                        dpg.add_plot_axis(dpg.mvXAxis, tag="conf_x", no_gridlines=True)
-                        dpg.set_axis_ticks("conf_x",
-                            tuple((str(i), float(i)) for i in range(10)))
-                        dpg.add_plot_axis(dpg.mvYAxis, tag="conf_y",
-                                          label="%", no_gridlines=True)
-                        dpg.set_axis_limits("conf_y", 0, 100)
-                        dpg.add_bar_series(list(range(10)), [0]*10,
-                                           weight=0.6,
-                                           parent="conf_y", tag="series_conf")
+                    # Hidden 2 ─ 64 neurons as 8×8 grid
+                    dpg.add_text("Hidden 2  (64 neurons)", color=(140, 170, 220))
+                    with dpg.drawlist(width=8 * _ACT_H2_PX,
+                                      height=8 * _ACT_H2_PX,
+                                      tag="act_draw_h2"):
+                        pass
+                    dpg.add_spacer(height=6)
+
+                    # Output ─ 10 probability bars
+                    dpg.add_text("Output  (10 classes)", color=(140, 170, 220))
+                    with dpg.drawlist(width=_ACT_BAR_W,
+                                      height=10 * _ACT_BAR_H,
+                                      tag="act_draw_out"):
+                        pass
 
         dpg.set_primary_window("main_win", True)
 
