@@ -42,10 +42,7 @@ _HIST_LEN      = 300              # batches in rolling window
 _ROLLING_N     = 20               # window for rolling avg / std
 
 # dataset browser
-_DS_COLS       = 5
-_DS_ROWS       = 5
-_DS_N          = _DS_COLS * _DS_ROWS   # 25 images per page
-_IMG_SZ        = 84                    # display size per image (pixels)
+_IMG_SZ        = 252                   # 9 × 28 — fills ~half the stats panel width
 _METRICS        = ["Activation value", "Running average", "Rolling std"]
 _WEIGHT_METRICS = ["Weight mean", "Weight std"]
 DRAW_GRID      = 28
@@ -263,13 +260,12 @@ class App:
         )
         dpg.setup_dearpygui()
 
-        # texture registry for dataset images (must exist before window)
+        # texture registry — single slot for the dataset viewer
         with dpg.texture_registry(tag="tex_registry"):
             placeholder = [0.12, 0.12, 0.18, 1.0] * (_IMG_SZ * _IMG_SZ)
-            for i in range(_DS_N):
-                dpg.add_raw_texture(_IMG_SZ, _IMG_SZ, placeholder,
-                                    tag=f"tex_ds_{i}",
-                                    format=dpg.mvFormat_Float_rgba)
+            dpg.add_raw_texture(_IMG_SZ, _IMG_SZ, placeholder,
+                                tag="tex_ds_0",
+                                format=dpg.mvFormat_Float_rgba)
 
         with dpg.window(tag="main_win",
                         no_resize=True, no_move=True, no_title_bar=True,
@@ -510,43 +506,31 @@ class App:
 
                         # ── Tab 4: Dataset ───────────────────────────────────
                         with dpg.tab(label="Dataset"):
+                            # nav row
                             with dpg.group(horizontal=True):
-                                dpg.add_button(label="◀ Prev", width=70,
+                                dpg.add_button(label="◀", width=40,
                                                callback=self._on_ds_prev)
-                                dpg.add_button(label="Next ▶", width=70,
+                                dpg.add_button(label="▶", width=40,
                                                callback=self._on_ds_next)
                                 dpg.add_spacer(width=8)
-                                dpg.add_button(label="Predict page",
-                                               width=100,
+                                dpg.add_button(label="Predict",
+                                               width=80,
                                                tag="btn_ds_predict",
                                                callback=self._on_ds_predict)
-                                dpg.add_spacer(width=8)
+                                dpg.add_spacer(width=12)
                                 dpg.add_text("Loading…", tag="txt_ds_page",
                                              color=(160, 160, 200))
                             dpg.add_separator()
 
-                            # scrollable child so tab bar header stays fixed
-                            with dpg.child_window(tag="ds_scroll",
-                                                  width=-1, height=-1,
-                                                  border=False):
-                                # 5×5 image grid
-                                for row in range(_DS_ROWS):
-                                    with dpg.group(horizontal=True):
-                                        for col in range(_DS_COLS):
-                                            idx = row * _DS_COLS + col
-                                            with dpg.group():
-                                                dpg.add_image(
-                                                    f"tex_ds_{idx}",
-                                                    width=_IMG_SZ,
-                                                    height=_IMG_SZ,
-                                                    tag=f"img_ds_{idx}",
-                                                )
-                                                dpg.add_text(
-                                                    "—",
-                                                    tag=f"lbl_ds_{idx}",
-                                                    color=(200, 200, 160),
-                                                )
-                                            dpg.add_spacer(width=4)
+                            # single large image
+                            dpg.add_image("tex_ds_0",
+                                          width=_IMG_SZ, height=_IMG_SZ,
+                                          tag="img_ds_0")
+                            dpg.add_spacer(height=6)
+                            dpg.add_text("—", tag="lbl_ds_0",
+                                         color=(200, 200, 160))
+                            dpg.add_text("", tag="lbl_ds_pred",
+                                         color=(80, 220, 80))
 
                         # ── Tab 5: Metrics ────────────────────────────────────
                         with dpg.tab(label="Metrics"):
@@ -733,8 +717,8 @@ class App:
             # 1. upscale with bicubic for smooth edges
             pil = _PILImage.fromarray((_np.clip(img, 0, 1) * 255).astype(_np.uint8), mode="L")
             pil = pil.resize((_IMG_SZ, _IMG_SZ), _PILImage.BICUBIC)
-            # 2. mild smooth pass to eliminate any remaining block artefacts
-            pil = pil.filter(_IFilter.SMOOTH)
+            # mild smooth to soften any residual block artefacts
+            pil = pil.filter(_IFilter.SMOOTH_MORE)
             arr = _np.asarray(pil).astype(_np.float32) / 255.0
         except ImportError:
             # fallback: bilinear via scipy if available, else nearest-neighbour
@@ -766,41 +750,33 @@ class App:
                 dpg.set_value("txt_ds_page",
                               f"Error loading dataset: {self._ds_error}")
             return
+
         n = len(self._dataset)
-        dpg.set_value("txt_ds_page",
-            f"Images {self._ds_offset}–{min(self._ds_offset + _DS_N, n) - 1}  of {n}")
+        idx = self._ds_offset
+        dpg.set_value("txt_ds_page", f"{idx + 1} / {n}")
 
-        import numpy as _np
-        blank = [0.08, 0.08, 0.14, 1.0] * (_IMG_SZ * _IMG_SZ)
+        img_tensor, label = self._dataset[idx]
+        img = img_tensor.squeeze().numpy()   # (28,28) float32 [0,1]
 
-        for i in range(_DS_N):
-            ds_idx = self._ds_offset + i
-            if ds_idx >= n:
-                dpg.set_value(f"tex_ds_{i}", blank)
-                dpg.set_value(f"lbl_ds_{i}", "—")
-                continue
+        dpg.set_value("tex_ds_0", self._mnist_to_texture(img))
+        dpg.set_value("lbl_ds_0", f"Label: {label}")
 
-            img_tensor, label = self._dataset[ds_idx]
-            img = img_tensor.squeeze().numpy()   # (28, 28) float32 [0,1]
-
-            dpg.set_value(f"tex_ds_{i}", self._mnist_to_texture(img))
-
-            # label / prediction text
-            if i < len(self._ds_preds):
-                p = self._ds_preds[i]
-                tick = "✓" if p == label else "✗"
-                dpg.configure_item(f"lbl_ds_{i}",
-                    color=(80, 220, 80) if p == label else (220, 80, 80))
-                dpg.set_value(f"lbl_ds_{i}", f"{label}→{p}{tick}")
+        if self._ds_preds:
+            p = self._ds_preds[0]
+            if p == label:
+                dpg.configure_item("lbl_ds_pred", color=(80, 220, 80))
+                dpg.set_value("lbl_ds_pred", f"Predicted: {p}  ✓")
             else:
-                dpg.configure_item(f"lbl_ds_{i}", color=(200, 200, 160))
-                dpg.set_value(f"lbl_ds_{i}", str(label))
+                dpg.configure_item("lbl_ds_pred", color=(220, 80, 80))
+                dpg.set_value("lbl_ds_pred", f"Predicted: {p}  ✗  (true: {label})")
+        else:
+            dpg.set_value("lbl_ds_pred", "")
 
     def _on_ds_prev(self) -> None:
         self._ds_preds = []
         if not self._ensure_dataset():
             return
-        self._ds_offset = max(0, self._ds_offset - _DS_N)
+        self._ds_offset = max(0, self._ds_offset - 1)
         self._ds_needs_refresh = True
 
     def _on_ds_next(self) -> None:
@@ -808,7 +784,7 @@ class App:
         if not self._ensure_dataset():
             return
         n = len(self._dataset)
-        self._ds_offset = min(self._ds_offset + _DS_N, n - _DS_N)
+        self._ds_offset = min(self._ds_offset + 1, n - 1)
         self._ds_needs_refresh = True
 
     def _on_ds_predict(self) -> None:
@@ -817,16 +793,10 @@ class App:
         if self._trainer is None or self._trainer.model is None:
             dpg.set_value("txt_ds_page", "Train the network first!")
             return
-        self._ds_preds = []
-        n = len(self._dataset)
-        for i in range(_DS_N):
-            ds_idx = self._ds_offset + i
-            if ds_idx >= n:
-                break
-            img_tensor, _ = self._dataset[ds_idx]
-            img = img_tensor.squeeze().numpy()
-            pred, *_ = self._trainer.model.predict(img)
-            self._ds_preds.append(pred)
+        img_tensor, _ = self._dataset[self._ds_offset]
+        img = img_tensor.squeeze().numpy()
+        pred, *_ = self._trainer.model.predict(img)
+        self._ds_preds = [pred]
         self._ds_needs_refresh = True
 
     # ── Node / weight filter ─────────────────────────────────────────────────
