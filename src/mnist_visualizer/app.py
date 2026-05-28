@@ -503,9 +503,9 @@ class App:
                         with dpg.tab(label="Dataset"):
                             # nav row
                             with dpg.group(horizontal=True):
-                                dpg.add_button(label="◀", width=40,
+                                dpg.add_button(label="< Prev", width=60,
                                                callback=self._on_ds_prev)
-                                dpg.add_button(label="▶", width=40,
+                                dpg.add_button(label="Next >", width=60,
                                                callback=self._on_ds_next)
                                 dpg.add_spacer(width=8)
                                 dpg.add_button(label="Predict",
@@ -707,15 +707,25 @@ class App:
         """Render a (28,28) float32 image into the ds_drawlist via pixel rectangles."""
         dpg.delete_item("ds_drawlist", children_only=True)
         px = _IMG_SZ / 28          # 252/28 = 9.0 screen pixels per MNIST pixel
+
+        # dark background so digit has contrast
+        dpg.draw_rectangle(
+            (0, 0), (_IMG_SZ, _IMG_SZ),
+            color=(15, 15, 25, 255), fill=(15, 15, 25, 255),
+            parent="ds_drawlist", thickness=0,
+        )
+
         import numpy as _np
-        img_g = _np.clip(img ** 0.5, 0.0, 1.0)   # gamma lift
+        # stronger gamma + contrast stretch for a crisp, bright digit
+        img_g = _np.clip(img ** 0.4, 0.0, 1.0)
+        img_g = _np.clip((img_g - 0.1) / 0.9, 0.0, 1.0)  # stretch away from bg
         for row in range(28):
             for col in range(28):
                 v = float(img_g[row, col])
-                if v < 0.02:       # skip near-black pixels for speed
+                if v < 0.04:       # skip near-black pixels for speed
                     continue
                 vi = int(v * 255)
-                color = (vi, vi, min(vi + 25, 255), 255)
+                color = (vi, vi, min(vi + 40, 255), 255)  # warm-white tinted blue
                 x0, y0 = col * px, row * px
                 dpg.draw_rectangle(
                     (x0, y0), (x0 + px, y0 + px),
