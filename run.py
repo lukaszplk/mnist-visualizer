@@ -45,8 +45,12 @@ def main() -> None:
 
     # ── 2. Install / update deps ──────────────────────────────────────────────
     print("[INFO] Checking dependencies (first run may take a minute)...")
-    run([str(PIP), "install", "--upgrade", "pip", "--quiet"])
-    run([str(PIP), "install", "-e", str(HERE), "--quiet"])
+    # use 'python -m pip' so pip can upgrade itself on Windows
+    subprocess.run(
+        [str(PYTHON), "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
+        check=False,   # non-fatal if it fails
+    )
+    run([str(PYTHON), "-m", "pip", "install", "-e", str(HERE), "--quiet"])
 
     # ── 3. Launch ─────────────────────────────────────────────────────────────
     print("[INFO] Launching...\n")
