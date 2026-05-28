@@ -270,13 +270,13 @@ class App:
             with dpg.group(horizontal=True):
                 dpg.add_text("MNIST Visualizer", color=(140, 170, 255))
                 dpg.add_spacer(width=16)
-                dpg.add_button(label="▶  Start", tag="btn_start",
+                dpg.add_button(label="Start", tag="btn_start",
                                callback=self._on_start,
                                width=90)
-                dpg.add_button(label="⏸  Pause", tag="btn_pause",
+                dpg.add_button(label="Pause", tag="btn_pause",
                                callback=self._on_pause,
                                width=90, enabled=False)
-                dpg.add_button(label="⏹  Stop", tag="btn_stop",
+                dpg.add_button(label="Stop", tag="btn_stop",
                                callback=self._on_stop,
                                width=90, enabled=False)
                 dpg.add_spacer(width=20)
@@ -356,7 +356,7 @@ class App:
                                            row_background=True):
                                 for col in ["Layer", "Act μ", "Act σ", "Dead %", "W μ", "∇W μ"]:
                                     dpg.add_table_column(label=col)
-                                for i, name in enumerate(["fc1 →128", "fc2 →64", "fc3 →10"]):
+                                for i, name in enumerate(["fc1 (128)", "fc2 (64)", "fc3 (10)"]):
                                     with dpg.table_row(tag=f"row_{i}"):
                                         dpg.add_text(name, tag=f"c{i}_name")
                                         dpg.add_text("—",  tag=f"c{i}_am")
@@ -663,10 +663,10 @@ class App:
             return
         self._trainer.toggle_pause()
         if self._trainer.paused:
-            dpg.set_item_label("btn_pause", "▶  Resume")
+            dpg.set_item_label("btn_pause", "Resume")
             dpg.set_value("txt_status", "Paused")
         else:
-            dpg.set_item_label("btn_pause", "⏸  Pause")
+            dpg.set_item_label("btn_pause", "Pause")
             dpg.set_value("txt_status", "Training…")
 
     def _on_stop(self) -> None:
@@ -678,7 +678,7 @@ class App:
         dpg.configure_item("inp_epochs", enabled=True)
         dpg.configure_item("inp_batch",  enabled=True)
         dpg.configure_item("inp_lr",     enabled=True)
-        dpg.set_item_label("btn_pause",  "⏸  Pause")
+        dpg.set_item_label("btn_pause",  "Pause")
         dpg.set_value("txt_status", "Stopped")
 
     # ── Dataset callbacks ─────────────────────────────────────────────────────
@@ -755,10 +755,10 @@ class App:
             p = self._ds_preds[0]
             if p == label:
                 dpg.configure_item("lbl_ds_pred", color=(80, 220, 80))
-                dpg.set_value("lbl_ds_pred", f"Predicted: {p}  ✓")
+                dpg.set_value("lbl_ds_pred", f"Predicted: {p}  [correct]")
             else:
                 dpg.configure_item("lbl_ds_pred", color=(220, 80, 80))
-                dpg.set_value("lbl_ds_pred", f"Predicted: {p}  ✗  (true: {label})")
+                dpg.set_value("lbl_ds_pred", f"Predicted: {p}  [wrong]  (true: {label})")
         else:
             dpg.set_value("lbl_ds_pred", "")
 
@@ -1236,7 +1236,7 @@ class App:
         # check if training finished
         if not self._trainer.is_running:
             self._on_stop()
-            dpg.set_value("txt_status", "Done ✓")
+            dpg.set_value("txt_status", "Done!")
 
     def _draw_network(
         self,
