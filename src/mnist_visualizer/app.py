@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import colorsys
 import math
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Optional
@@ -1317,9 +1318,28 @@ class App:
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _apply_dark_titlebar(title: str) -> None:
+        """Enable dark mode on the OS title bar (Windows 10 build 18985+ / 11)."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.FindWindowW(None, title)
+            if not hwnd:
+                return
+            # DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            value = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 20, ctypes.byref(value), ctypes.sizeof(value)
+            )
+        except Exception:
+            pass  # not critical — older Windows versions may not support it
+
     def run(self) -> None:
         self._build()
         dpg.show_viewport()
+        self._apply_dark_titlebar("MNIST Neural Network Visualizer")
 
         # draw empty canvas + empty network on startup
         self._render_draw_canvas()
