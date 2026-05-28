@@ -394,14 +394,16 @@ class App:
                                     dpg.add_text("show:", color=(120, 120, 160))
                                     dpg.add_input_text(
                                         tag=f"inp_node_filter_{li}",
-                                        hint=f"0–{_NODE_SHOWN[li]-1}, empty=all",
+                                        hint=f"0-{_NODE_SHOWN[li]-1}, empty=all",
                                         width=130, on_enter=True,
-                                        callback=lambda s, a, u=li:
+                                        user_data=li,
+                                        callback=lambda s, a, u:
                                             self._apply_filter(u, a, "node"),
                                     )
                                     dpg.add_button(
                                         label="all", width=32,
-                                        callback=lambda s, a, u=li:
+                                        user_data=li,
+                                        callback=lambda s, a, u:
                                             self._clear_filter(u, "node"),
                                     )
                                 with dpg.plot(height=ph, width=-1,
@@ -461,14 +463,16 @@ class App:
                                     dpg.add_text("show:", color=(120, 120, 160))
                                     dpg.add_input_text(
                                         tag=f"inp_weight_filter_{li}",
-                                        hint=f"0–{_NODE_SHOWN[li]-1}, empty=all",
+                                        hint=f"0-{_NODE_SHOWN[li]-1}, empty=all",
                                         width=130, on_enter=True,
-                                        callback=lambda s, a, u=li:
+                                        user_data=li,
+                                        callback=lambda s, a, u:
                                             self._apply_filter(u, a, "weight"),
                                     )
                                     dpg.add_button(
                                         label="all", width=32,
-                                        callback=lambda s, a, u=li:
+                                        user_data=li,
+                                        callback=lambda s, a, u:
                                             self._clear_filter(u, "weight"),
                                     )
                                 with dpg.plot(height=ph, width=-1,
