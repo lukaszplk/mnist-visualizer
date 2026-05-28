@@ -803,6 +803,34 @@ class App:
                           color=(30, 30, 40, 180), parent=tag, thickness=1)
 
     @staticmethod
+    def _draw_act_input_placeholder() -> None:
+        """Draw an empty placeholder in act_draw_input before any inference."""
+        dpg.delete_item("act_draw_input", children_only=True)
+        w, h = 28 * _ACT_INPUT_PX, 28 * _ACT_INPUT_PX
+        dpg.draw_rectangle(
+            (0, 0), (w, h),
+            color=(20, 20, 35, 255), fill=(20, 20, 35, 255),
+            parent="act_draw_input", thickness=0,
+        )
+        dpg.draw_rectangle(
+            (2, 2), (w - 2, h - 2),
+            color=(50, 55, 80, 255), fill=None,
+            parent="act_draw_input", thickness=1,
+        )
+        dpg.draw_text(
+            (10, h // 2 - 18),
+            "Draw a digit and",
+            color=(100, 110, 160, 255), size=14,
+            parent="act_draw_input",
+        )
+        dpg.draw_text(
+            (10, h // 2),
+            "click  Recognise",
+            color=(100, 110, 160, 255), size=14,
+            parent="act_draw_input",
+        )
+
+    @staticmethod
     def _draw_act_input(img: "np.ndarray") -> None:
         """Render the 28×28 input image into act_draw_input."""
         import numpy as _np
@@ -1548,6 +1576,7 @@ class App:
         # draw empty canvas + empty network on startup
         self._render_draw_canvas()
         self._draw_network([], [])
+        self._draw_act_input_placeholder()
 
         # load dataset in background so Dataset tab is ready immediately
         threading.Thread(target=self._ensure_dataset, daemon=True).start()
