@@ -513,7 +513,7 @@ class App:
                                                tag="btn_ds_predict",
                                                callback=self._on_ds_predict)
                                 dpg.add_spacer(width=12)
-                                dpg.add_text("Loading…", tag="txt_ds_page",
+                                dpg.add_text("Loading...", tag="txt_ds_page",
                                              color=(160, 160, 200))
                             dpg.add_separator()
 
@@ -656,7 +656,7 @@ class App:
         dpg.configure_item("inp_epochs", enabled=False)
         dpg.configure_item("inp_batch",  enabled=False)
         dpg.configure_item("inp_lr",     enabled=False)
-        dpg.set_value("txt_status", "Training…")
+        dpg.set_value("txt_status", "Training...")
 
     def _on_pause(self) -> None:
         if not self._trainer:
@@ -667,7 +667,7 @@ class App:
             dpg.set_value("txt_status", "Paused")
         else:
             dpg.set_item_label("btn_pause", "Pause")
-            dpg.set_value("txt_status", "Training…")
+            dpg.set_value("txt_status", "Training...")
 
     def _on_stop(self) -> None:
         if self._trainer:
@@ -835,7 +835,7 @@ class App:
             return
         if self._metrics_computing:
             return
-        dpg.set_value("txt_metrics_status", "Computing…")
+        dpg.set_value("txt_metrics_status", "Computing...")
         threading.Thread(target=self._compute_metrics, daemon=True).start()
 
     def _compute_metrics(self) -> None:
@@ -1230,7 +1230,7 @@ class App:
                 and not self._metrics_computing
                 and self._trainer.model is not None):
             self._last_val_epoch = stats.epoch
-            dpg.set_value("txt_metrics_status", "Computing…")
+            dpg.set_value("txt_metrics_status", "Computing...")
             threading.Thread(target=self._compute_metrics, daemon=True).start()
 
         # check if training finished
