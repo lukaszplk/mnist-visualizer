@@ -44,6 +44,13 @@ _ROLLING_N     = 20               # window for rolling avg / std
 
 # dataset browser
 _IMG_SZ        = 252                   # 9 × 28 — fills ~half the stats panel width
+
+# activations tab cell sizes
+_ACT_INPUT_PX  = 7     # px per MNIST pixel in input grid  (28×28 → 196×196)
+_ACT_H1_PX     = 20    # px per neuron in hidden-1 grid    (16×8  → 320×160)
+_ACT_H2_PX     = 26    # px per neuron in hidden-2 grid    (8×8   → 208×208)
+_ACT_BAR_W     = 340   # width of output probability bars
+_ACT_BAR_H     = 28    # height per class bar
 _METRICS        = ["Activation value", "Running average", "Rolling std"]
 _WEIGHT_METRICS = ["Weight mean", "Weight std"]
 DRAW_GRID      = 28
@@ -162,6 +169,10 @@ class App:
         self._ds_preds: list[int] = []
         self._ds_needs_refresh = False  # set by bg thread, consumed by main thread
         self._ds_error: str = ""
+
+        # activations tab
+        self._act_input_img: Optional[np.ndarray] = None  # last (28,28) inference input
+        self._act_needs_refresh = False
 
         # metrics / confusion matrix
         self._cm: Optional[np.ndarray]      = None   # (10,10) int
@@ -599,6 +610,53 @@ class App:
                                     dpg.add_text("—", tag="mc_macro_f1")
                                     dpg.add_text("—", tag="mc_macro_sup")
 
+                        # ── Tab 6: Activations ───────────────────────────────
+                        with dpg.tab(label="Activations"):
+                            dpg.add_text("", tag="txt_act_status",
+                                         color=(160, 160, 200))
+                            dpg.add_separator()
+                            with dpg.child_window(tag="act_scroll",
+                                                  width=-1, height=-1,
+                                                  border=False):
+                                # Input layer ─ 28×28 grid
+                                dpg.add_text("Input  (784 pixels)",
+                                             color=(140, 170, 220))
+                                with dpg.drawlist(
+                                        width=28 * _ACT_INPUT_PX,
+                                        height=28 * _ACT_INPUT_PX,
+                                        tag="act_draw_input"):
+                                    pass
+                                dpg.add_spacer(height=8)
+
+                                # Hidden 1 ─ 128 neurons as 16×8 grid
+                                dpg.add_text("Hidden 1  (128 neurons)",
+                                             color=(140, 170, 220))
+                                with dpg.drawlist(
+                                        width=16 * _ACT_H1_PX,
+                                        height=8  * _ACT_H1_PX,
+                                        tag="act_draw_h1"):
+                                    pass
+                                dpg.add_spacer(height=8)
+
+                                # Hidden 2 ─ 64 neurons as 8×8 grid
+                                dpg.add_text("Hidden 2  (64 neurons)",
+                                             color=(140, 170, 220))
+                                with dpg.drawlist(
+                                        width=8 * _ACT_H2_PX,
+                                        height=8 * _ACT_H2_PX,
+                                        tag="act_draw_h2"):
+                                    pass
+                                dpg.add_spacer(height=8)
+
+                                # Output ─ 10 probability bars
+                                dpg.add_text("Output  (10 classes)",
+                                             color=(140, 170, 220))
+                                with dpg.drawlist(
+                                        width=_ACT_BAR_W,
+                                        height=10 * _ACT_BAR_H,
+                                        tag="act_draw_out"):
+                                    pass
+
                 # ── Right: draw & recognise ───────────────────────────────────
                 with dpg.child_window(width=self._draw_w, height=self._content_h,
                                       tag="draw_win", border=True):
@@ -707,6 +765,129 @@ class App:
             self._ds_error = str(exc)
             self._ds_needs_refresh = True
             return False
+
+    # ── Activations tab ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _draw_act_grid(tag: str, values: "np.ndarray",
+                       cols: int, cell: int) -> None:
+        """Fill a drawlist with a colored grid of neuron activations."""
+        import numpy as _np
+        dpg.delete_item(tag, children_only=True)
+        rows = int(_np.ceil(len(values) / cols))
+        v_min, v_max = float(values.min()), float(values.max())
+        span = (v_max - v_min) or 1.0
+        for idx, raw in enumerate(values):
+            v = float((raw - v_min) / span)   # normalise to [0,1]
+            r = int(v * 80)
+            g = int(v * 160)
+            b = int(50 + v * 200)
+            col_i = idx % cols
+            row_i = idx // cols
+            x0, y0 = col_i * cell, row_i * cell
+            dpg.draw_rectangle(
+                (x0, y0), (x0 + cell - 1, y0 + cell - 1),
+                color=(r, g, b, 255), fill=(r, g, b, 255),
+                parent=tag, thickness=0,
+            )
+        # draw thin grid lines for readability
+        w = cols * cell
+        h = rows * cell
+        for c in range(cols + 1):
+            x = c * cell
+            dpg.draw_line((x, 0), (x, h),
+                          color=(30, 30, 40, 180), parent=tag, thickness=1)
+        for r in range(rows + 1):
+            y = r * cell
+            dpg.draw_line((0, y), (w, y),
+                          color=(30, 30, 40, 180), parent=tag, thickness=1)
+
+    @staticmethod
+    def _draw_act_input(img: "np.ndarray") -> None:
+        """Render the 28×28 input image into act_draw_input."""
+        import numpy as _np
+        dpg.delete_item("act_draw_input", children_only=True)
+        px = _ACT_INPUT_PX
+        img_g = _np.clip(img ** 0.5, 0.0, 1.0)
+        # dark background
+        dpg.draw_rectangle(
+            (0, 0), (28 * px, 28 * px),
+            color=(12, 12, 20, 255), fill=(12, 12, 20, 255),
+            parent="act_draw_input", thickness=0,
+        )
+        for row in range(28):
+            for col in range(28):
+                v = float(img_g[row, col])
+                if v < 0.03:
+                    continue
+                vi = int(v * 255)
+                color = (vi, vi, min(vi + 40, 255), 255)
+                x0, y0 = col * px, row * px
+                dpg.draw_rectangle(
+                    (x0, y0), (x0 + px, y0 + px),
+                    color=color, fill=color,
+                    parent="act_draw_input", thickness=0,
+                )
+
+    @staticmethod
+    def _draw_act_bars(probs: "np.ndarray") -> None:
+        """Render output class probability bars into act_draw_out."""
+        dpg.delete_item("act_draw_out", children_only=True)
+        best = int(probs.argmax())
+        for i, p in enumerate(probs):
+            y0 = i * _ACT_BAR_H
+            bar_w = int(p * (_ACT_BAR_W - 60))
+            # bar fill
+            if i == best:
+                color = (80, 220, 120, 255)
+            else:
+                color = (60, 100, 180, 255)
+            dpg.draw_rectangle(
+                (50, y0 + 2), (50 + max(bar_w, 2), y0 + _ACT_BAR_H - 2),
+                color=color, fill=color,
+                parent="act_draw_out", thickness=0,
+            )
+            # class label
+            dpg.draw_text(
+                (2, y0 + 4), f"{i}:",
+                color=(200, 200, 160, 255), size=14,
+                parent="act_draw_out",
+            )
+            # percentage
+            dpg.draw_text(
+                (55 + max(bar_w, 2), y0 + 4), f"{p*100:.1f}%",
+                color=(160, 160, 200, 255), size=13,
+                parent="act_draw_out",
+            )
+
+    def _update_activations_display(
+        self,
+        acts: list,
+        probs: "np.ndarray",
+        input_img: Optional["np.ndarray"] = None,
+        status: str = "",
+    ) -> None:
+        """Refresh the Activations tab. Must run on the main thread."""
+        import numpy as _np
+        if status:
+            dpg.set_value("txt_act_status", status)
+
+        if input_img is not None:
+            self._draw_act_input(input_img)
+        elif self._act_input_img is not None:
+            self._draw_act_input(self._act_input_img)
+
+        # hidden layers
+        if len(acts) >= 1:
+            a1 = _np.array(acts[0], dtype=_np.float32)
+            self._draw_act_grid("act_draw_h1", a1, cols=16, cell=_ACT_H1_PX)
+        if len(acts) >= 2:
+            a2 = _np.array(acts[1], dtype=_np.float32)
+            self._draw_act_grid("act_draw_h2", a2, cols=8,  cell=_ACT_H2_PX)
+
+        # output
+        if probs is not None and len(probs) == 10:
+            self._draw_act_bars(_np.array(probs, dtype=_np.float32))
 
     def _draw_mnist_image(self, img: "np.ndarray") -> None:
         """Render a (28,28) float32 image into the ds_drawlist via pixel rectangles."""
@@ -1006,6 +1187,14 @@ class App:
         self._inference_active = True
         self._inference_drawn  = False
 
+        # store input for Activations tab
+        self._act_input_img = self._draw_grid.copy()
+        self._update_activations_display(
+            acts, probs,
+            input_img=self._draw_grid,
+            status=f"Inference: predicted {pred}  ({float(probs[pred])*100:.1f}%)",
+        )
+
         # compute decision-path highlights
         self._compute_highlights(pred, acts, weights)
 
@@ -1228,6 +1417,17 @@ class App:
         if step_now - self._last_graph_step >= self._graph_redraw_rate:
             self._last_graph_step = step_now
             self._draw_network(stats.activations, stats.weights)
+            # update activations tab every N steps during training
+            import numpy as _np
+            dummy_probs = _np.zeros(10, dtype=_np.float32)
+            if stats.activations and len(stats.activations) >= 3:
+                dummy_probs = _np.array(stats.activations[2], dtype=_np.float32)
+                sm = _np.exp(dummy_probs - dummy_probs.max())
+                dummy_probs = sm / sm.sum()
+            self._update_activations_display(
+                stats.activations, dummy_probs,
+                status=f"Training  epoch {stats.epoch}  batch {stats.batch}",
+            )
 
         # auto-recompute metrics at each epoch end
         if (stats.epoch != self._last_val_epoch
